@@ -82,6 +82,20 @@ struct GitHubReleaseInfo: Equatable, Identifiable {
     var hasTrustedDigest: Bool {
         matchedAsset?.expectedSHA256Hex != nil
     }
+
+    func withMatchedAsset(_ asset: GitHubReleaseAsset?) -> GitHubReleaseInfo {
+        GitHubReleaseInfo(
+            tagName: tagName,
+            version: version,
+            title: title,
+            body: body,
+            htmlURL: htmlURL,
+            matchedAsset: asset,
+            downloadURL: asset.flatMap { URL(string: $0.browserDownloadURL) },
+            isPrerelease: isPrerelease,
+            isFromWebFallback: isFromWebFallback
+        )
+    }
 }
 
 enum UpdateDownloadState: Equatable {
@@ -160,8 +174,8 @@ enum UpdateVerificationError: LocalizedError, Equatable {
             )
         case .missingDigest:
             return L10n.t(
-                "未能从 GitHub Releases API 获取可信 SHA-256 摘要，出于安全考虑已禁止自动打开安装包，请前往官方 Release 页面手动核验下载",
-                "Could not obtain a trusted SHA-256 digest from GitHub Releases API. Auto-opening is disabled; please download manually from the official Release page."
+                "未能从 GitHub Releases API 或 SHA256SUMS.txt 获取可信 SHA-256 摘要，出于安全考虑已禁止自动打开安装包，请前往官方 Release 页面手动核验下载",
+                "Could not obtain a trusted SHA-256 digest from GitHub Releases API or SHA256SUMS.txt. Auto-opening is disabled; please download manually from the official Release page."
             )
         case .digestMismatch:
             return L10n.t(
@@ -175,6 +189,9 @@ enum UpdateVerificationError: LocalizedError, Equatable {
 }
 
 enum UpdateSecurityPolicy {
+    static let checksumsAssetFileName = "SHA256SUMS.txt"
+    static let maxChecksumsFileBytes = 1_048_576
+
     /// 允许的 GitHub Release 附件下载重定向 CDN 主机白名单
     static let allowedCDNHosts: Set<String> = [
         "objects.githubusercontent.com",
@@ -214,6 +231,138 @@ enum UpdateSecurityPolicy {
             return isAllowedReleaseAssetURL(url, repo: repo)
         }
         return allowedCDNHosts.contains(host)
+    }
+
+    /// 构造并校验同一 Release 下的 SHA256SUMS.txt 官方下载地址
+    nonisolated static func releaseChecksumsURL(
+        tagName: String,
+        repo: String = UpdateService.githubRepo
+    ) -> URL? {
+        let trimmed = tagName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.contains("..") else {
+            return nil
+        }
+        let encodedTag = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+        let raw = "https://github.com/\(repo)/releases/download/\(encodedTag)/\(checksumsAssetFileName)"
+        guard let url = URL(string: raw),
+              isAllowedReleaseAssetURL(url, repo: repo) else {
+            return nil
+        }
+        return url
+    }
+
+    /// 校验给定的 SHA256SUMS.txt URL 严格属于目标仓库的同一个 Release tag
+    nonisolated static func isSameReleaseChecksumsURL(
+        _ url: URL,
+        tagName: String,
+        repo: String = UpdateService.githubRepo
+    ) -> Bool {
+        guard isAllowedReleaseAssetURL(url, repo: repo) else { return false }
+        let trimmedTag = tagName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTag.isEmpty else { return false }
+
+        let path = url.path
+        let prefix = "/\(repo)/releases/download/"
+        guard path.lowercased().hasPrefix(prefix.lowercased()) else { return false }
+        let remainder = String(path.dropFirst(prefix.count))
+        let parts = remainder.split(separator: "/").map(String.init)
+        guard parts.count == 2 else { return false }
+
+        let urlTag = (parts[0].removingPercentEncoding ?? parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlFile = (parts[1].removingPercentEncoding ?? parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return urlTag == trimmedTag && urlFile.caseInsensitiveCompare(checksumsAssetFileName) == .orderedSame
+    }
+
+    /// 解析 sha256sum / shasum / BSD 校验清单，提取目标安装包文件名对应的 64 位小写 SHA-256
+    /// 兼容 `artifacts/<name>` 前缀、`*` 二进制标记及空格路径；若同名存在冲突摘要则拒绝返回 nil
+    nonisolated static func parseSHA256Sums(
+        _ content: String,
+        matchingFileName targetFileName: String
+    ) -> String? {
+        let targetBase = normalizedFileBasename(targetFileName)
+        guard !targetBase.isEmpty else { return nil }
+        let targetLower = targetBase.lowercased()
+
+        let normalized = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        var exactMatches: Set<String> = []
+        var ciMatches: Set<String> = []
+
+        for line in normalized.components(separatedBy: "\n") {
+            guard let parsed = parseSHA256SumsLine(line) else { continue }
+            if parsed.fileName == targetBase {
+                exactMatches.insert(parsed.sha256Hex)
+            } else if parsed.fileName.lowercased() == targetLower {
+                ciMatches.insert(parsed.sha256Hex)
+            }
+        }
+
+        if !exactMatches.isEmpty {
+            return exactMatches.count == 1 ? exactMatches.first : nil
+        }
+        return ciMatches.count == 1 ? ciMatches.first : nil
+    }
+
+    private nonisolated static func isValidSHA256Hex(_ raw: String) -> Bool {
+        guard raw.count == 64 else { return false }
+        return raw.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) || ("A"..."F").contains($0) }
+    }
+
+    private nonisolated static func normalizedFileBasename(_ raw: String) -> String {
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count >= 2, trimmed.hasPrefix("\""), trimmed.hasSuffix("\"") {
+            trimmed = String(trimmed.dropFirst().dropLast())
+        }
+        let unified = trimmed.replacingOccurrences(of: "\\", with: "/")
+        let lastSeg = unified.split(separator: "/").last.map(String.init) ?? ""
+        return lastSeg.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func parseSHA256SumsLine(_ line: String) -> (sha256Hex: String, fileName: String)? {
+        var trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("\u{FEFF}") {
+            trimmed.removeFirst()
+            trimmed = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+
+        // BSD / OpenSSL 格式: SHA256 (<path>) = <64-hex>
+        if trimmed.lowercased().hasPrefix("sha256") {
+            let afterLabel = trimmed.dropFirst(6).trimmingCharacters(in: .whitespaces)
+            if afterLabel.hasPrefix("("),
+               let closeIdx = afterLabel.lastIndex(of: ")") {
+                let pathPart = String(afterLabel[afterLabel.index(after: afterLabel.startIndex)..<closeIdx])
+                let afterParen = afterLabel[afterLabel.index(after: closeIdx)...].trimmingCharacters(in: .whitespaces)
+                if afterParen.hasPrefix("=") {
+                    let hashPart = afterParen.dropFirst().trimmingCharacters(in: .whitespaces)
+                    let base = normalizedFileBasename(pathPart)
+                    if isValidSHA256Hex(hashPart), !base.isEmpty {
+                        return (hashPart.lowercased(), base)
+                    }
+                }
+            }
+        }
+
+        // GNU sha256sum / shasum 格式: [\]<64-hex><spaces/tabs>[*]<path>
+        let gnuLine = trimmed.hasPrefix("\\") ? String(trimmed.dropFirst()) : trimmed
+        guard let wsIdx = gnuLine.firstIndex(where: { $0 == " " || $0 == "\t" }) else {
+            return nil
+        }
+        let hashPart = String(gnuLine[..<wsIdx])
+        guard isValidSHA256Hex(hashPart) else { return nil }
+
+        var pathPart = String(gnuLine[wsIdx...]).trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+        if pathPart.hasPrefix("*") {
+            pathPart.removeFirst()
+        }
+        let base = normalizedFileBasename(pathPart)
+        guard !base.isEmpty else { return nil }
+        return (hashPart.lowercased(), base)
     }
 
     /// 校验目标资产文件名、扩展名、排除源码包、拒绝非本机架构（arm64 上拒绝纯 x86_64/intel 包）与版本一致性
@@ -566,7 +715,7 @@ enum UpdateReleaseParser {
     }
 }
 
-// MARK: - 独立网页降级解析器（R06：与 API 主流程解耦，绝不伪造可信 SHA-256 摘要）
+// MARK: - 独立网页降级解析器（R06：与 API 主流程解耦；HTML 链接本身不携带摘要，由同 Release 的 SHA256SUMS.txt 或 API 校验）
 
 enum UpdateWebFallbackParser {
     private static let markdownBodyStartRegex = try! NSRegularExpression(

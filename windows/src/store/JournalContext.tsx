@@ -1613,12 +1613,14 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
         downloadUrl: asset.browserDownloadUrl,
         fileName: asset.name,
         expectedSize: asset.size,
+        tagName: availableUpdate.tagName,
+        expectedDigest: asset.digest ?? null,
       });
       setUpdateDownloadState({ status: "completed", filePath: savedPath });
       showToast(
         t(
-          "更新包已下载至 Downloads 并启动安装程序",
-          "Installer downloaded to Downloads and launched",
+          "更新包已通过 SHA-256 校验并启动安装程序",
+          "Installer SHA-256 verified and launched",
           isEnglish
         )
       );

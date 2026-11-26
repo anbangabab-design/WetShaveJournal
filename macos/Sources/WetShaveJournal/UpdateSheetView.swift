@@ -94,8 +94,8 @@ struct UpdateSheetView: View {
                             Image(systemName: "shield.lefthalf.filled")
                                 .foregroundStyle(ShaveTheme.amber)
                             Text(L10n.t(
-                                "当前通过网页通道获取版本，点击下载将先尝试通过 GitHub API 获取官方 SHA-256 摘要；若无法校验将不会自动打开安装包。",
-                                "Fetched via web fallback. Downloading will first attempt to fetch the official SHA-256 digest via GitHub API; unverified installers will not auto-open."
+                                "当前通过网页通道获取版本且暂未获取到 SHA-256 摘要，点击下载将先尝试通过 GitHub API 或同 Release 的 SHA256SUMS.txt 恢复摘要；若仍无法校验将不会自动打开安装包。",
+                                "Fetched via web fallback without a SHA-256 digest yet. Downloading will first attempt to retrieve the digest via GitHub API or the Release's SHA256SUMS.txt; unverified installers will not auto-open."
                             ))
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)

@@ -175,13 +175,71 @@ final class UpdateService: NSObject, ObservableObject {
 
     func fetchLatestReleaseViaAPI() async throws -> GitHubReleaseInfo {
         let endpoint = "https://api.github.com/repos/\(Self.githubRepo)/releases/latest"
-        return try await fetchAPIRelease(endpoint: endpoint)
+        var release = try await fetchAPIRelease(endpoint: endpoint)
+        if !release.hasTrustedDigest,
+           let asset = release.matchedAsset,
+           let shaHex = await fetchSHA256FromReleaseChecksums(
+               tagName: release.tagName,
+               assetName: asset.name
+           ) {
+            let enriched = GitHubReleaseAsset(
+                name: asset.name,
+                browserDownloadURL: asset.browserDownloadURL,
+                size: asset.size,
+                digest: "sha256:\(shaHex)"
+            )
+            release = release.withMatchedAsset(enriched)
+        }
+        return release
     }
 
     func fetchReleaseByTagViaAPI(tagName: String) async throws -> GitHubReleaseInfo {
         let encodedTag = tagName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? tagName
         let endpoint = "https://api.github.com/repos/\(Self.githubRepo)/releases/tags/\(encodedTag)"
         return try await fetchAPIRelease(endpoint: endpoint)
+    }
+
+    /// 从同一 Release 的 SHA256SUMS.txt 下载并解析目标安装包对应的 64 位小写 SHA-256
+    func fetchSHA256FromReleaseChecksums(
+        tagName: String,
+        assetName: String,
+        candidateAssets: [GitHubReleaseAsset] = []
+    ) async -> String? {
+        let candidateURL: URL? = candidateAssets.compactMap { asset -> URL? in
+            guard asset.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(UpdateSecurityPolicy.checksumsAssetFileName) == .orderedSame,
+                  let url = URL(string: asset.browserDownloadURL),
+                  UpdateSecurityPolicy.isSameReleaseChecksumsURL(url, tagName: tagName, repo: Self.githubRepo) else {
+                return nil
+            }
+            return url
+        }.first
+
+        guard let checksumsURL = candidateURL
+            ?? UpdateSecurityPolicy.releaseChecksumsURL(tagName: tagName, repo: Self.githubRepo),
+              UpdateSecurityPolicy.isAllowedReleaseAssetURL(checksumsURL, repo: Self.githubRepo) else {
+            return nil
+        }
+
+        var req = URLRequest(url: checksumsURL, timeoutInterval: 15)
+        req.setValue("text/plain, */*", forHTTPHeaderField: "Accept")
+        req.setValue("WetShaveJournal/\(currentVersionProvider())", forHTTPHeaderField: "User-Agent")
+
+        guard let (data, resp) = try? await transport.data(for: req),
+              let http = resp as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              !data.isEmpty,
+              data.count <= UpdateSecurityPolicy.maxChecksumsFileBytes else {
+            return nil
+        }
+        if let finalURL = http.url,
+           !UpdateSecurityPolicy.isAllowedDownloadRedirectURL(finalURL, repo: Self.githubRepo) {
+            return nil
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return UpdateSecurityPolicy.parseSHA256Sums(text, matchingFileName: assetName)
     }
 
     private func fetchAPIRelease(endpoint: String) async throws -> GitHubReleaseInfo {
@@ -259,11 +317,25 @@ final class UpdateService: NSObject, ObservableObject {
             }
         }
 
-        let matchedAsset = UpdateReleaseParser.selectPreferredAsset(
+        var matchedAsset = UpdateReleaseParser.selectPreferredAsset(
             from: assets,
             expectedVersion: normalizedVersion,
             repo: Self.githubRepo
         )
+        if let asset = matchedAsset,
+           asset.expectedSHA256Hex == nil,
+           let shaHex = await fetchSHA256FromReleaseChecksums(
+               tagName: rawTag,
+               assetName: asset.name,
+               candidateAssets: assets
+           ) {
+            matchedAsset = GitHubReleaseAsset(
+                name: asset.name,
+                browserDownloadURL: asset.browserDownloadURL,
+                size: asset.size,
+                digest: "sha256:\(shaHex)"
+            )
+        }
         let downloadURL = matchedAsset.flatMap { URL(string: $0.browserDownloadURL) }
 
         return GitHubReleaseInfo(
@@ -306,7 +378,7 @@ final class UpdateService: NSObject, ObservableObject {
         availableRelease = nil
     }
 
-    /// 启动安全下载：禁止并行重复下载；若缺少可信 SHA-256（如网页降级）先尝试通过 API 恢复摘要，仍缺失则阻止自动打开并引导前往 Release 页
+    /// 启动安全下载：禁止并行重复下载；若缺少可信 SHA-256（如网页降级）先尝试通过 API 或同 Release 的 SHA256SUMS.txt 恢复摘要，仍缺失则阻止自动打开并引导前往 Release 页
     func startDownload(for release: GitHubReleaseInfo) {
         guard !downloadState.isBusy else { return }
 
@@ -315,20 +387,49 @@ final class UpdateService: NSObject, ObservableObject {
         }
     }
 
-    func prepareAndStartDownload(for release: GitHubReleaseInfo) async {
-        guard !downloadState.isBusy else { return }
-
+    /// 下载前补全可信 SHA-256 摘要：优先尝试 GitHub API，失败或无 digest 时自动从同一 Release 下载 SHA256SUMS.txt 解析
+    func resolveTrustedReleaseForDownload(_ release: GitHubReleaseInfo) async -> GitHubReleaseInfo {
         var effectiveRelease = release
         if !effectiveRelease.hasTrustedDigest {
-            // 优先通过 GitHub API 按 tag 恢复官方 digest 与精确文件大小（S02）
-            if let apiRecovered = try? await fetchReleaseByTagViaAPI(tagName: release.tagName),
-               apiRecovered.hasTrustedDigest {
-                effectiveRelease = apiRecovered
-                if availableRelease?.version == apiRecovered.version {
-                    availableRelease = apiRecovered
+            // 1. 优先通过 GitHub API 按 tag 恢复官方 digest 与精确文件大小（S02）
+            if let apiRecovered = try? await fetchReleaseByTagViaAPI(tagName: release.tagName) {
+                if apiRecovered.hasTrustedDigest {
+                    effectiveRelease = apiRecovered
+                } else if let currentAsset = effectiveRelease.matchedAsset,
+                          let apiAsset = apiRecovered.matchedAsset,
+                          currentAsset.size == 0,
+                          apiAsset.size > 0,
+                          apiAsset.name.caseInsensitiveCompare(currentAsset.name) == .orderedSame {
+                    effectiveRelease = apiRecovered
                 }
             }
         }
+
+        if !effectiveRelease.hasTrustedDigest,
+           let asset = effectiveRelease.matchedAsset,
+           let shaHex = await fetchSHA256FromReleaseChecksums(
+               tagName: effectiveRelease.tagName,
+               assetName: asset.name
+           ) {
+            let enrichedAsset = GitHubReleaseAsset(
+                name: asset.name,
+                browserDownloadURL: asset.browserDownloadURL,
+                size: asset.size,
+                digest: "sha256:\(shaHex)"
+            )
+            effectiveRelease = effectiveRelease.withMatchedAsset(enrichedAsset)
+        }
+
+        if effectiveRelease != release, availableRelease?.version == effectiveRelease.version {
+            availableRelease = effectiveRelease
+        }
+        return effectiveRelease
+    }
+
+    func prepareAndStartDownload(for release: GitHubReleaseInfo) async {
+        guard !downloadState.isBusy else { return }
+
+        let effectiveRelease = await resolveTrustedReleaseForDownload(release)
 
         guard let asset = effectiveRelease.matchedAsset,
               let url = effectiveRelease.downloadURL else {

@@ -61,6 +61,12 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Generate SHA256SUMS.txt
+        run: |
+          find artifacts -mindepth 2 -type f -exec mv -t artifacts/ {} +
+          find artifacts -mindepth 1 -type d -empty -delete
+          rm -f artifacts/SHA256SUMS.txt
+          sha256sum artifacts/* > artifacts/SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           draft: false

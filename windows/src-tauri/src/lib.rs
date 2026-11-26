@@ -134,10 +134,20 @@ async fn download_and_open_update(
     download_url: String,
     file_name: String,
     expected_size: u64,
+    tag_name: Option<String>,
+    expected_digest: Option<String>,
 ) -> Result<String, String> {
     let cancel_flag = state.cancel_flag.clone();
-    updater::download_and_open_update(app, cancel_flag, download_url, file_name, expected_size)
-        .await
+    updater::download_and_open_update(
+        app,
+        cancel_flag,
+        download_url,
+        file_name,
+        expected_size,
+        tag_name,
+        expected_digest,
+    )
+    .await
 }
 
 #[tauri::command]

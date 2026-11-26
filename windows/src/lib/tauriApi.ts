@@ -185,8 +185,16 @@ export async function downloadAndOpenUpdate(params: {
   downloadUrl: string;
   fileName: string;
   expectedSize: number;
+  tagName?: string | null;
+  expectedDigest?: string | null;
 }): Promise<string> {
-  return invoke<string>("download_and_open_update", params);
+  return invoke<string>("download_and_open_update", {
+    downloadUrl: params.downloadUrl,
+    fileName: params.fileName,
+    expectedSize: params.expectedSize,
+    tagName: params.tagName ?? null,
+    expectedDigest: params.expectedDigest ?? null,
+  });
 }
 
 export async function cancelUpdateDownload(): Promise<void> {
