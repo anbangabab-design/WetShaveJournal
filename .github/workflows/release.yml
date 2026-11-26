@@ -14,19 +14,16 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build macOS .pkg
+      - name: Build macOS .dmg
         run: |
           cd macos
           WSJ_DATA_DIR="$GITHUB_WORKSPACE/out-macos" WSJ_APP_DIR="/tmp/wsj-app" bash build.sh
           VER=$(grep '^VERSION=' build.sh | head -n1 | cut -d'"' -f2)
-          if [ -f "$GITHUB_WORKSPACE/out-macos/湿剃日记-${VER}.pkg" ]; then
-            cp "$GITHUB_WORKSPACE/out-macos/湿剃日记-${VER}.pkg" "$GITHUB_WORKSPACE/out-macos/WetShaveJournal-${VER}-arm64.pkg"
-          fi
-          test -f "$GITHUB_WORKSPACE/out-macos/WetShaveJournal-${VER}-arm64.pkg"
+          test -f "$GITHUB_WORKSPACE/out-macos/WetShaveJournal-${VER}-arm64.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-installer
-          path: out-macos/WetShaveJournal-*-arm64.pkg
+          path: out-macos/WetShaveJournal-*-arm64.dmg
 
   build-windows:
     runs-on: windows-latest

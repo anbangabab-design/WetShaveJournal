@@ -5,11 +5,11 @@ import SwiftUI
 
 enum AppMetadata {
     static var version: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.0"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.1"
     }
 
     static var build: String {
-        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "18"
+        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "19"
     }
 }
 
@@ -333,7 +333,7 @@ enum GearAuditItemStatus: String, Hashable, Sendable {
     case skippedManual
 }
 
-struct GearAuditUpdateProposal: Identifiable, Hashable {
+struct GearAuditUpdateProposal: Identifiable, Hashable, Codable {
     var id: String { item.id }
     var item: GearItem
     var proposed: GearOverride
@@ -344,7 +344,7 @@ struct GearAuditUpdateProposal: Identifiable, Hashable {
     var sourceSnapshotFingerprint: String = ""
 }
 
-struct GearAuditMergeProposal: Identifiable, Hashable {
+struct GearAuditMergeProposal: Identifiable, Hashable, Codable {
     var id: String { "\(source.id)->\(target.id)" }
     var source: GearItem
     var target: GearItem
@@ -354,11 +354,34 @@ struct GearAuditMergeProposal: Identifiable, Hashable {
     var targetSnapshotFingerprint: String = ""
 }
 
-struct GearAuditBatchFailure: Identifiable, Hashable {
+struct GearAuditBatchFailure: Identifiable, Hashable, Codable {
     var id: UUID = UUID()
     var batchIndex: Int
     var items: [GearItem]
     var reason: String
+}
+
+/// AI 体检会话轻量持久化模型（存储于数据目录 ai_health_check_session.json，支持关闭弹窗或重启后断点续做）
+struct AIHealthCheckSession: Codable, Equatable {
+    var schemaVersion: Int = 1
+    var savedAt: String
+    var scopeRawValue: String
+    var category: GearCategory?
+    var modelUsed: String?
+    var plannedCount: Int
+    var verifiedCount: Int
+    var skippedCount: Int
+    var unknownOrDuplicateIDCount: Int
+    var retryRound: Int
+    var updates: [GearAuditUpdateProposal]
+    var merges: [GearAuditMergeProposal]
+    var undeterminedItems: [GearItem]
+    var failedItems: [GearItem]
+    var batchFailures: [GearAuditBatchFailure]
+
+    var hasActionableRemainder: Bool {
+        !updates.isEmpty || !merges.isEmpty || !failedItems.isEmpty || !undeterminedItems.isEmpty || !batchFailures.isEmpty
+    }
 }
 
 struct GearAuditProgress: Sendable {

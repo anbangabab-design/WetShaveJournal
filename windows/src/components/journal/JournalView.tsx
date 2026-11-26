@@ -10,9 +10,15 @@ import {
   X,
 } from "lucide-react";
 import { getDisplayModel } from "../../lib/gearKnowledge";
-import { brandDisplay, irritationDisplay, t } from "../../lib/l10n";
 import {
-  getPrimaryBlade,
+  brandDisplay,
+  categorySingularName,
+  irritationDisplay,
+  t,
+} from "../../lib/l10n";
+import {
+  getAfterShave,
+  getBrush,
   getPrimaryRazor,
   getSoap,
   parseDateISO,
@@ -21,6 +27,7 @@ import { useJournal } from "../../store/JournalContext";
 import {
   ALL_IRRITATION_LEVELS,
   ALL_SHAVE_RESULTS,
+  type GearCategory,
   type IrritationLevel,
   type JournalEntry,
   type ShaveResult,
@@ -216,7 +223,7 @@ export const JournalView: React.FC<JournalViewProps> = ({ onCreateNew }) => {
   return (
     <div className="flex h-full w-full min-h-0 overflow-hidden">
       {/* 中间栏：搜索 + 筛选 + 月视图日历 + 日记列表 */}
-      <section className="flex h-full w-[365px] min-w-[325px] shrink-0 flex-col border-r border-[var(--wsj-border)] bg-[var(--wsj-canvas)]">
+      <section className="flex h-full w-[320px] min-w-[280px] max-w-[380px] shrink-0 flex-col border-r border-[var(--wsj-border)] bg-[var(--wsj-canvas)]">
         {/* 搜索与筛选头部 */}
         <div className="space-y-2.5 border-b border-[var(--wsj-border)] p-3.5">
           <div className="flex items-center gap-2">
@@ -374,15 +381,44 @@ export const JournalView: React.FC<JournalViewProps> = ({ onCreateNew }) => {
             {filteredEntries.map((entry) => {
               const isSelected = activeEntry?.id === entry.id;
               const proc = getParsedProcess(entry);
-              const razorRaw = getPrimaryRazor(entry);
-              const bladeRaw = getPrimaryBlade(entry);
-              const soapRaw = getSoap(entry);
-              const razorOv = razorRaw
-                ? resolveGearItem("剃须刀", razorRaw).override
-                : null;
-              const soapOv = soapRaw
-                ? resolveGearItem("剃须皂", soapRaw).override
-                : null;
+
+              const gearSlots: {
+                id: GearCategory;
+                brand: string;
+                shortName: string;
+                fullLabel: string;
+              }[] = [];
+
+              const pushSlot = (category: GearCategory, raw: string) => {
+                const trimmed = raw.trim();
+                if (!trimmed || trimmed === "无" || trimmed === "-") return;
+                const ov = resolveGearItem(category, trimmed).override;
+                const displayModel = getDisplayModel(ov).trim();
+                const shortName = displayModel || ov.name;
+                const bText = brandDisplay(ov.brand, isEnglish);
+                const isGenericBrand =
+                  !ov.brand ||
+                  ov.brand === "品牌未注明" ||
+                  ov.brand === "无品牌" ||
+                  ov.brand === "仿刀";
+                const catLabel = categorySingularName(category, isEnglish);
+                const fullLabel =
+                  isGenericBrand ||
+                  shortName.toLowerCase().startsWith(bText.toLowerCase())
+                    ? `${catLabel}：${shortName}`
+                    : `${catLabel}：${bText} ${shortName}`;
+                gearSlots.push({
+                  id: category,
+                  brand: ov.brand,
+                  shortName,
+                  fullLabel,
+                });
+              };
+
+              pushSlot("剃须刀", getPrimaryRazor(entry));
+              pushSlot("剃须刷", getBrush(entry));
+              pushSlot("剃须皂", getSoap(entry));
+              pushSlot("须后", getAfterShave(entry));
 
               return (
                 <div
@@ -404,7 +440,7 @@ export const JournalView: React.FC<JournalViewProps> = ({ onCreateNew }) => {
                       y: Math.min(e.clientY, window.innerHeight - 135),
                     });
                   }}
-                  className={`cursor-pointer select-none rounded-[13px] border p-3.5 transition ${
+                  className={`cursor-pointer select-none rounded-[12px] border px-3 py-2.5 transition ${
                     isSelected
                       ? "border-[var(--wsj-accent)]/55 bg-[var(--wsj-accent-soft)]"
                       : "border-[var(--wsj-border)] bg-[var(--wsj-card)] hover:border-[var(--wsj-text-tertiary)]/40"
@@ -413,10 +449,10 @@ export const JournalView: React.FC<JournalViewProps> = ({ onCreateNew }) => {
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5">
                       <span
-                        className={`font-mono text-[13px] font-semibold ${
+                        className={`text-[11.5px] font-normal ${
                           isSelected
-                            ? "text-[var(--wsj-accent)]"
-                            : "text-[var(--wsj-text-secondary)]"
+                            ? "text-[var(--wsj-accent)]/85"
+                            : "text-[var(--wsj-text-secondary)]/80"
                         }`}
                       >
                         {entry.date}
@@ -452,35 +488,24 @@ export const JournalView: React.FC<JournalViewProps> = ({ onCreateNew }) => {
                     </div>
                   </div>
 
-                  <div className="mt-2">
-                    {razorOv ? (
-                      <div className="flex items-center gap-2">
-                        <BrandAvatar brand={razorOv.brand} size={20} />
-                        <span className="shrink-0 text-[12px] font-medium text-[var(--wsj-text-secondary)]">
-                          {brandDisplay(razorOv.brand, isEnglish)}
-                        </span>
-                        <span className="truncate text-[14.5px] font-semibold text-[var(--wsj-text)]">
-                          {getDisplayModel(razorOv)}
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="text-[13.5px] font-medium text-[var(--wsj-text-secondary)]">
-                        {t("未记录剃须刀", "No razor recorded", isEnglish)}
-                      </div>
-                    )}
-                  </div>
-
-                  {(bladeRaw || soapOv) && (
-                    <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-[var(--wsj-text-secondary)]">
-                      {bladeRaw && <span className="truncate">{bladeRaw}</span>}
-                      {bladeRaw && soapOv && (
-                        <span className="shrink-0 text-[var(--wsj-text-tertiary)]">
-                          ·
-                        </span>
-                      )}
-                      {soapOv && (
-                        <span className="truncate">{soapOv.name}</span>
-                      )}
+                  {gearSlots.length === 0 ? (
+                    <div className="mt-2 text-[12.5px] font-normal text-[var(--wsj-text-secondary)]">
+                      {t("未记录装备", "No gear recorded", isEnglish)}
+                    </div>
+                  ) : (
+                    <div className="mt-2 grid grid-cols-2 gap-x-2.5 gap-y-1.5">
+                      {gearSlots.map((slot) => (
+                        <div
+                          key={slot.id}
+                          title={slot.fullLabel}
+                          className="flex min-w-0 items-center gap-1.5"
+                        >
+                          <BrandAvatar brand={slot.brand} size={17} />
+                          <span className="truncate text-[12.5px] font-medium text-[var(--wsj-text)]">
+                            {slot.shortName}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>

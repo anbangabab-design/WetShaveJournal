@@ -13,6 +13,7 @@ import {
   inferDefaultOverride,
   isRazorAdjustable,
   normalizeKey,
+  parseBladeUsage,
   resolveGear,
   searchGearCandidates,
   suggestedNextBladeUseCount,
@@ -24,12 +25,14 @@ import {
   getRawEntrySamples,
   getReferencedEntryCount,
   normalizedBrandKey,
+  overrideFromGearItem,
   planApplyAuditProposals,
   planDeleteGearItem,
   planMergeGearItem,
   planSplitRawKey,
   planUndoLastGearChange,
   planUpdateGearItem,
+  sanitizeOverride,
 } from "../lib/gearMutations";
 import { formatCloudSyncSummary, resolveIsEnglish, t } from "../lib/l10n";
 import { getProcessText, parseProcessText } from "../lib/processParser";
@@ -189,6 +192,12 @@ async function copyTextToClipboard(text: string): Promise<void> {
   document.body.removeChild(textarea);
 }
 
+export interface SelectedGearBinding {
+  category: GearCategory;
+  insertedText: string;
+  item: GearItem;
+}
+
 interface JournalContextValue {
   database: JournalDatabase;
   config: AppConfigInfo | null;
@@ -269,7 +278,10 @@ interface JournalContextValue {
   uploadCustomBrandLogo: (brand: string) => Promise<boolean>;
 
   reloadJournal: () => Promise<void>;
-  upsertEntry: (entry: JournalEntry) => Promise<{ ok: boolean; error?: string }>;
+  upsertEntry: (
+    entry: JournalEntry,
+    selectedGearBindings?: SelectedGearBinding[]
+  ) => Promise<{ ok: boolean; error?: string }>;
   deleteEntry: (entry: JournalEntry) => Promise<{ ok: boolean; error?: string }>;
   createQuickGear: (
     category: GearCategory,
@@ -531,7 +543,20 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
         return null;
       }
       const key = normalizedBrandKey(trimmed);
-      return brandLogos[key] ?? null;
+      if (brandLogos[key]) {
+        return brandLogos[key];
+      }
+      for (const sep of ["×", " x ", " X ", " / ", "/"]) {
+        if (trimmed.includes(sep)) {
+          for (const part of trimmed.split(sep)) {
+            const pKey = normalizedBrandKey(part);
+            if (pKey && brandLogos[pKey]) {
+              return brandLogos[pKey];
+            }
+          }
+        }
+      }
+      return null;
     },
     [brandLogos]
   );
@@ -786,7 +811,10 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
   );
 
   const upsertEntry = useCallback(
-    async (entry: JournalEntry) => {
+    async (
+      entry: JournalEntry,
+      selectedGearBindings?: SelectedGearBinding[]
+    ) => {
       const existingIdx = database.entries.findIndex((e) => e.id === entry.id);
       const existing = existingIdx >= 0 ? database.entries[existingIdx] : null;
 
@@ -810,9 +838,49 @@ export const JournalProvider: React.FC<{ children: React.ReactNode }> = ({
         nextEntries.push(updated);
       }
 
+      let nextOverrides = database.overrides;
+      let nextPending = database.pending;
+      if (selectedGearBindings && selectedGearBindings.length > 0) {
+        const overridesCopy: Record<string, GearOverride> = {
+          ...database.overrides,
+        };
+        const pendingSet = new Set<string>(database.pending);
+        let overridesChanged = false;
+
+        for (const binding of selectedGearBindings) {
+          const trimmed = binding.insertedText.trim();
+          if (!trimmed) continue;
+          const effectiveRaw =
+            binding.category === "刀片"
+              ? parseBladeUsage(trimmed).baseName
+              : trimmed;
+          const norm = normalizeKey(effectiveRaw);
+          if (!norm) continue;
+          const normKey = `${binding.category}|${norm}`;
+          if (!overridesCopy[normKey]) {
+            overridesCopy[normKey] = {
+              ...sanitizeOverride(
+                overrideFromGearItem(binding.item),
+                binding.category
+              ),
+              updatedAt: updated.updatedAt,
+            };
+            pendingSet.delete(normKey);
+            overridesChanged = true;
+          }
+        }
+
+        if (overridesChanged) {
+          nextOverrides = overridesCopy;
+          nextPending = Array.from(pendingSet);
+        }
+      }
+
       const candidate: JournalDatabase = {
         ...database,
         entries: nextEntries,
+        overrides: nextOverrides,
+        pending: nextPending,
       };
       if (candidate.deletedEntryIds && updated.id in candidate.deletedEntryIds) {
         const nextTombstones = { ...candidate.deletedEntryIds };

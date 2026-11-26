@@ -49,7 +49,10 @@ import {
   getSoap,
   parseProcessText,
 } from "../../lib/processParser";
-import { useJournal } from "../../store/JournalContext";
+import {
+  useJournal,
+  type SelectedGearBinding,
+} from "../../store/JournalContext";
 import {
   ALL_GEAR_CATEGORIES,
   ALL_IRRITATION_LEVELS,
@@ -58,6 +61,7 @@ import {
   ALL_SHAVE_PASS_TYPES,
   ALL_SHAVE_RESULTS,
   type GearCategory,
+  type GearItem,
   type IrritationLevel,
   type JournalEntry,
   type LatheringMethod,
@@ -157,10 +161,25 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
   const [processNote, setProcessNote] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const selectedGearBindingsRef = useRef<
+    Partial<Record<GearCategory, SelectedGearBinding>>
+  >({});
+
+  const recordSelectedGear = useCallback(
+    (category: GearCategory, item: GearItem, insertedText: string) => {
+      selectedGearBindingsRef.current[category] = {
+        category,
+        insertedText: insertedText.trim(),
+        item,
+      };
+    },
+    []
+  );
 
   // 打开弹窗时初始化表单（与 Mac 版 EntryEditorSheet.loadInitialValues 一致）
   useEffect(() => {
     if (!open) return;
+    selectedGearBindingsRef.current = {};
     setSaveError(null);
     setNaturalInput("");
     setNaturalStatus(null);
@@ -742,7 +761,24 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
       locallyModified: true,
     };
 
-    const res = await upsertEntry(entry);
+    const currentValuesByCategory: Record<GearCategory, string> = {
+      剃须刀: razor.trim(),
+      刀片: trimmedBlade,
+      剃须刷: brush.trim(),
+      剃须皂: soap.trim(),
+      剃须碗: bowlName.trim(),
+      须前: preShave.trim(),
+      须后: afterShave.trim(),
+    };
+    const activeBindings: SelectedGearBinding[] = [];
+    for (const cat of ALL_GEAR_CATEGORIES) {
+      const binding = selectedGearBindingsRef.current[cat];
+      if (binding && binding.insertedText === currentValuesByCategory[cat]) {
+        activeBindings.push(binding);
+      }
+    }
+
+    const res = await upsertEntry(entry, activeBindings);
     setIsSaving(false);
     if (res.ok) {
       showToast(t("已保存 SOTD 日记", "Saved SOTD entry", isEnglish));
@@ -1030,6 +1066,9 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
                   "Search or enter razor...",
                   isEnglish
                 )}
+                onSelectItem={(selected, inserted) => {
+                  recordSelectedGear("剃须刀", selected, inserted);
+                }}
               />
 
               {/* 刀片 + 使用次数累计 & 换新刀片 */}
@@ -1044,8 +1083,9 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
                     "Search or enter blade...",
                     isEnglish
                   )}
-                  onSelectItem={(selected) => {
-                    setBladeUseCount(getSuggestedNextBladeUse(selected.name));
+                  onSelectItem={(selected, inserted) => {
+                    recordSelectedGear("刀片", selected, inserted);
+                    setBladeUseCount(getSuggestedNextBladeUse(inserted));
                   }}
                 />
 
@@ -1103,6 +1143,9 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
                   "Search or enter brush...",
                   isEnglish
                 )}
+                onSelectItem={(selected, inserted) => {
+                  recordSelectedGear("剃须刷", selected, inserted);
+                }}
               />
 
               <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
@@ -1116,6 +1159,9 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
                     "Search or enter soap...",
                     isEnglish
                   )}
+                  onSelectItem={(selected, inserted) => {
+                    recordSelectedGear("剃须皂", selected, inserted);
+                  }}
                 />
                 <GearAutocompleteField
                   title={categorySingularName("剃须碗", isEnglish)}
@@ -1123,6 +1169,9 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
                   value={bowlName}
                   onChange={setBowlName}
                   placeholder={t("选填...", "Optional...", isEnglish)}
+                  onSelectItem={(selected, inserted) => {
+                    recordSelectedGear("剃须碗", selected, inserted);
+                  }}
                 />
               </div>
 
@@ -1133,6 +1182,9 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
                   value={preShave}
                   onChange={setPreShave}
                   placeholder={t("选填...", "Optional...", isEnglish)}
+                  onSelectItem={(selected, inserted) => {
+                    recordSelectedGear("须前", selected, inserted);
+                  }}
                 />
                 <GearAutocompleteField
                   title={categorySingularName("须后", isEnglish)}
@@ -1140,6 +1192,9 @@ export const EntryEditorModal: React.FC<EntryEditorModalProps> = ({
                   value={afterShave}
                   onChange={setAfterShave}
                   placeholder={t("选填...", "Optional...", isEnglish)}
+                  onSelectItem={(selected, inserted) => {
+                    recordSelectedGear("须后", selected, inserted);
+                  }}
                 />
               </div>
             </div>

@@ -3,6 +3,9 @@ import { Copy, Pencil, Trash2 } from "lucide-react";
 import {
   getDisplayModel,
   getSpecTags,
+  inferBladeType,
+  inferRazorType,
+  normalizeRazorType,
   parseBladeUsage,
 } from "../../lib/gearKnowledge";
 import {
@@ -32,13 +35,16 @@ import {
 } from "../../lib/processParser";
 import { useJournal } from "../../store/JournalContext";
 import type {
+  BladeType,
   GearCategory,
   IrritationLevel,
   JournalEntry,
+  RazorType,
 } from "../../types/journal";
 import { BrandAvatar } from "../ui/BrandAvatar";
 import { SectionCard } from "../ui/SectionCard";
 import { TagPill, type TagTone } from "../ui/TagPill";
+import { GearSilhouette } from "./GearSilhouette";
 
 interface EntryDetailPaneProps {
   entry: JournalEntry;
@@ -63,14 +69,33 @@ const GearMiniTile: React.FC<GearMiniTileProps> = ({ category, rawValue }) => {
   const { resolveGearItem, isEnglish } = useJournal();
   const { override: ov } = resolveGearItem(category, rawValue);
   const bladeParsed =
-    category === "刀片" ? parseBladeUsage(rawValue) : { baseName: rawValue, useCount: null };
+    category === "刀片"
+      ? parseBladeUsage(rawValue)
+      : { baseName: rawValue, useCount: null };
   const specTags = getSpecTags(category, ov, isEnglish, true);
   const modelText = getDisplayModel(ov);
+  const resolvedRazorType: RazorType | undefined =
+    category === "剃须刀"
+      ? normalizeRazorType(ov.razorType as string | undefined) ??
+        inferRazorType(ov.name)
+      : undefined;
+  const resolvedBladeType: BladeType | undefined =
+    category === "刀片"
+      ? (ov.bladeType as BladeType | undefined) ?? inferBladeType(ov.name)
+      : undefined;
 
   return (
-    <div className="flex h-full flex-col gap-2.5 rounded-[11px] bg-[var(--wsj-subtle)] p-3.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[12px] font-medium text-[var(--wsj-text-secondary)]">
+    <div className="relative flex h-full min-h-[92px] flex-col gap-2.5 overflow-hidden rounded-[11px] bg-[var(--wsj-subtle)] p-3.5">
+      <GearSilhouette
+        category={category}
+        razorType={resolvedRazorType}
+        bladeType={resolvedBladeType}
+        size={70}
+        className="absolute bottom-0.5 right-1.5 z-0"
+      />
+
+      <div className="relative z-10 flex items-center justify-between gap-2">
+        <span className="text-[11.5px] font-medium text-[var(--wsj-text-secondary)]">
           {categorySingularName(category, isEnglish)}
         </span>
         {bladeParsed.useCount !== null && (
@@ -85,7 +110,7 @@ const GearMiniTile: React.FC<GearMiniTileProps> = ({ category, rawValue }) => {
         )}
       </div>
 
-      <div className="flex items-center gap-2.5">
+      <div className="relative z-10 flex items-center gap-2.5 pr-9">
         <BrandAvatar brand={ov.brand} size={22} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--wsj-text-secondary)]">
@@ -113,7 +138,7 @@ const GearMiniTile: React.FC<GearMiniTileProps> = ({ category, rawValue }) => {
       </div>
 
       {specTags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
+        <div className="relative z-10 flex flex-wrap gap-1.5 pr-8">
           {specTags.map((tag, idx) => (
             <TagPill key={`${tag}-${idx}`} text={tag} tone="neutral" />
           ))}
@@ -145,14 +170,65 @@ export const EntryDetailPane: React.FC<EntryDetailPaneProps> = ({
   const afterShower = getAfterShower(entry).startsWith("是");
   const alum = getAlum(entry).startsWith("是");
 
-  const hasAnyGear =
-    razors.length > 0 ||
-    blades.length > 0 ||
-    Boolean(brush) ||
-    Boolean(soap) ||
-    Boolean(bowl) ||
-    (Boolean(preShave) && preShave !== "无") ||
-    (Boolean(afterShave) && afterShave !== "无");
+  const pairedSetupTiles: {
+    key: string;
+    category: GearCategory;
+    rawValue: string;
+  }[] = [];
+  const maxRazorBlade = Math.max(razors.length, blades.length);
+  for (let i = 0; i < maxRazorBlade; i++) {
+    if (i < razors.length) {
+      pairedSetupTiles.push({
+        key: `razor-${i}-${razors[i]}`,
+        category: "剃须刀",
+        rawValue: razors[i],
+      });
+    }
+    if (i < blades.length) {
+      pairedSetupTiles.push({
+        key: `blade-${i}-${blades[i]}`,
+        category: "刀片",
+        rawValue: blades[i],
+      });
+    }
+  }
+  if (brush) {
+    pairedSetupTiles.push({
+      key: `brush-${brush}`,
+      category: "剃须刷",
+      rawValue: brush,
+    });
+  }
+  if (soap) {
+    pairedSetupTiles.push({
+      key: `soap-${soap}`,
+      category: "剃须皂",
+      rawValue: soap,
+    });
+  }
+  if (preShave && preShave !== "无") {
+    pairedSetupTiles.push({
+      key: `preshave-${preShave}`,
+      category: "须前",
+      rawValue: preShave,
+    });
+  }
+  if (afterShave && afterShave !== "无") {
+    pairedSetupTiles.push({
+      key: `aftershave-${afterShave}`,
+      category: "须后",
+      rawValue: afterShave,
+    });
+  }
+  if (bowl) {
+    pairedSetupTiles.push({
+      key: `bowl-${bowl}`,
+      category: "剃须碗",
+      rawValue: bowl,
+    });
+  }
+
+  const hasAnyGear = pairedSetupTiles.length > 0;
 
   return (
     <div className="h-full flex-1 overflow-y-auto px-7 py-6">
@@ -233,30 +309,14 @@ export const EntryDetailPane: React.FC<EntryDetailPaneProps> = ({
             </h2>
 
             {hasAnyGear ? (
-              <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
-                {razors.map((raw, idx) => (
+              <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
+                {pairedSetupTiles.map((tile) => (
                   <GearMiniTile
-                    key={`razor-${idx}-${raw}`}
-                    category="剃须刀"
-                    rawValue={raw}
+                    key={tile.key}
+                    category={tile.category}
+                    rawValue={tile.rawValue}
                   />
                 ))}
-                {blades.map((raw, idx) => (
-                  <GearMiniTile
-                    key={`blade-${idx}-${raw}`}
-                    category="刀片"
-                    rawValue={raw}
-                  />
-                ))}
-                {brush && <GearMiniTile category="剃须刷" rawValue={brush} />}
-                {soap && <GearMiniTile category="剃须皂" rawValue={soap} />}
-                {bowl && <GearMiniTile category="剃须碗" rawValue={bowl} />}
-                {preShave && preShave !== "无" && (
-                  <GearMiniTile category="须前" rawValue={preShave} />
-                )}
-                {afterShave && afterShave !== "无" && (
-                  <GearMiniTile category="须后" rawValue={afterShave} />
-                )}
               </div>
             ) : (
               <p className="text-[13.5px] text-[var(--wsj-text-secondary)]">

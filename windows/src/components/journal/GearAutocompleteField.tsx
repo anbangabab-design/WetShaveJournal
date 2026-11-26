@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, PlusCircle, X } from "lucide-react";
-import { isShortGapSpec } from "../../lib/gearKnowledge";
+import {
+  getAutocompleteInsertText,
+  isShortGapSpec,
+} from "../../lib/gearKnowledge";
 import {
   brandDisplay,
   gearStatusDisplay,
@@ -18,7 +21,7 @@ interface GearAutocompleteFieldProps {
   value: string;
   placeholder: string;
   onChange: (value: string) => void;
-  onSelectItem?: (item: GearItem) => void;
+  onSelectItem?: (item: GearItem, insertedText: string) => void;
 }
 
 function statusTone(status: GearItem["status"]): TagTone {
@@ -52,6 +55,11 @@ export const GearAutocompleteField: React.FC<GearAutocompleteFieldProps> = ({
 
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const allCategoryItems = useMemo(
+    () => getSearchCandidates(category, ""),
+    [category, getSearchCandidates]
+  );
+
   const candidates = useMemo(() => {
     const query = showAllMode ? "" : value;
     const limit = showAllMode ? 40 : 8;
@@ -75,10 +83,11 @@ export const GearAutocompleteField: React.FC<GearAutocompleteFieldProps> = ({
   }, [isDropdownOpen, showQuickAdd]);
 
   const handleSelect = (item: GearItem) => {
-    onChange(item.name);
+    const inserted = getAutocompleteInsertText(item, allCategoryItems);
+    onChange(inserted);
     setIsDropdownOpen(false);
     setShowAllMode(false);
-    onSelectItem?.(item);
+    onSelectItem?.(item, inserted);
   };
 
   const handleQuickCreate = async () => {

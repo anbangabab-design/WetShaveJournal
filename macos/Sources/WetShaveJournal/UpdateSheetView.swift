@@ -153,8 +153,8 @@ struct UpdateSheetView: View {
                             Text(L10n.t("已通过 SHA-256 一致性校验并打开安装包", "SHA-256 verified against Release metadata; installer opened"))
                                 .font(.system(size: 12.5, weight: .semibold))
                             Text(L10n.t(
-                                "SHA-256: \(sha256Hex.prefix(16))…（校验与 Release 元数据一致；请按向导覆盖安装后重启）",
-                                "SHA-256: \(sha256Hex.prefix(16))… (matches Release metadata; finish installing and restart)"
+                                "SHA-256: \(sha256Hex.prefix(16))…（校验与 Release 元数据一致；请拖入「应用程序」或按向导覆盖安装后重启）",
+                                "SHA-256: \(sha256Hex.prefix(16))… (matches Release metadata; drag to Applications or finish installing and restart)"
                             ))
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)

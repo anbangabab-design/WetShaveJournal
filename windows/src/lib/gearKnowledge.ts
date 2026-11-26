@@ -218,7 +218,10 @@ export const KNOWN_BRANDS: [string, string][] = [
   ["ae ", "Ariana & Evans"],
   ["ariana", "Ariana & Evans"],
   ["laxo", "Laxo"],
-  ["华研", "华研"],
+  ["terry's soap", "Terry's Soap"],
+  ["terrys soap", "Terry's Soap"],
+  ["hwayeon", "Terry's Soap"],
+  ["华研", "Terry's Soap"],
   ["哼哈", "哼哈"],
   ["双面", "Twoface"],
   ["rokyhows", "Rokyhows"],
@@ -230,7 +233,9 @@ export const KNOWN_BRANDS: [string, string][] = [
   ["fine", "Fine Accoutrements"],
   ["nomad theory", "Nomad Theory"],
   ["s.ghost", "S.ghost"],
-  ["帝诗", "帝诗"],
+  ["dscosmetic", "DSCosmetic"],
+  ["ds cosmetic", "DSCosmetic"],
+  ["帝诗", "DSCosmetic"],
   ["树皮", "树皮"],
   ["阳森", "阳森"],
   ["图腾", "图腾"],
@@ -792,6 +797,84 @@ export function getDisplayModel(ov: GearOverride): string {
   return n;
 }
 
+/** 规范显示名（所见即所得，与联想下拉展示的「品牌 + 型号」保持一致，如 `Feather New Hi-Stainless`） */
+export function getCanonicalDisplayName(
+  brand: string,
+  model: string,
+  fallbackName: string
+): string {
+  const cleanBrand = (brand || "").trim();
+  const cleanModel = (model || "").trim();
+  const cleanFallback = (fallbackName || "").trim();
+  const effectiveModel = cleanModel || cleanFallback;
+  if (!effectiveModel) return cleanBrand;
+
+  const isGenericBrand =
+    !cleanBrand ||
+    cleanBrand === "品牌未注明" ||
+    cleanBrand === "无品牌" ||
+    cleanBrand === "仿刀";
+  if (isGenericBrand) return effectiveModel;
+
+  if (effectiveModel.toLowerCase().startsWith(cleanBrand.toLowerCase())) {
+    return effectiveModel;
+  }
+  return `${cleanBrand} ${effectiveModel}`;
+}
+
+export function getOverrideCanonicalDisplayName(ov: GearOverride): string {
+  return getCanonicalDisplayName(ov.brand, getDisplayModel(ov), ov.name);
+}
+
+export function getItemCanonicalDisplayName(item: GearItem): string {
+  return getCanonicalDisplayName(item.brand, item.model, item.name);
+}
+
+/** 联想菜单点选后填入输入框的规范显示名（同品牌同型号存在多规格变体时自动附加区分规格） */
+export function getAutocompleteInsertText(
+  item: GearItem,
+  allItems: GearItem[]
+): string {
+  const base = getItemCanonicalDisplayName(item);
+  const baseNorm = normalizeKey(base);
+  const hasCollision = allItems.some(
+    (other) =>
+      other.id !== item.id &&
+      normalizeKey(getItemCanonicalDisplayName(other)) === baseNorm
+  );
+  if (!hasCollision) return base;
+
+  const extras: string[] = [];
+  if (item.category === "剃须刀") {
+    const mat = item.material?.trim();
+    if (mat && !base.toLowerCase().includes(mat.toLowerCase())) {
+      extras.push(mat);
+    }
+    if (item.plateType && !base.toUpperCase().includes(item.plateType)) {
+      extras.push(item.plateType);
+    }
+    const gap = isShortGapSpec(item.gapOrSpec);
+    if (gap && !base.toLowerCase().includes(gap.toLowerCase())) {
+      extras.push(gap);
+    }
+  } else if (item.category === "剃须刷") {
+    const hb = item.handleBrand?.trim();
+    if (hb && !base.toLowerCase().includes(hb.toLowerCase())) {
+      extras.push(hb);
+    }
+    const ks = item.knotSize?.trim();
+    if (ks && !base.toLowerCase().includes(ks.toLowerCase())) {
+      extras.push(ks);
+    }
+  } else if (item.category === "剃须皂" || item.category === "须后") {
+    if (item.isSample) {
+      extras.push("小样");
+    }
+  }
+
+  return extras.length === 0 ? base : `${base} (${extras.join(" ")})`;
+}
+
 export function isShortGapSpec(raw: string | undefined): string | null {
   const trimmed = raw?.trim();
   if (!trimmed || trimmed.length > 12) return null;
@@ -913,6 +996,35 @@ export function resolveGear(
   if (existing) {
     return { key: fullKey, override: hydrateOverride(existing, category) };
   }
+
+  // 若输入为既有器材的规范显示名（如点选「Feather New Hi-Stainless」而旧规则键为「刀片|featherde」），
+  // 反向映射至唯一匹配的既有 override，确保器材库与统计引擎归为同一器材绝不分裂
+  const prefix = `${category}|`;
+  let matchedIdentity: string | null = null;
+  let matchedOverride: GearOverride | null = null;
+  let isAmbiguous = false;
+  for (const [k, rawOv] of Object.entries(db.overrides ?? {})) {
+    if (!k.startsWith(prefix)) continue;
+    const hydrated = hydrateOverride(rawOv, category);
+    const nameNorm = normalizeKey(hydrated.name);
+    const canonicalNorm = normalizeKey(getOverrideCanonicalDisplayName(hydrated));
+    if (nameNorm !== norm && canonicalNorm !== norm) continue;
+    const sig = variantSignature(category, hydrated);
+    const identity = `${category}|${(hydrated.brand || "").toLowerCase()}|${(hydrated.name || "").toLowerCase()}|${sig}`;
+    if (matchedIdentity !== null) {
+      if (matchedIdentity !== identity) {
+        isAmbiguous = true;
+        break;
+      }
+    } else {
+      matchedIdentity = identity;
+      matchedOverride = hydrated;
+    }
+  }
+  if (!isAmbiguous && matchedOverride) {
+    return { key: fullKey, override: matchedOverride };
+  }
+
   return { key: fullKey, override: inferDefaultOverride(effectiveRaw, category) };
 }
 
@@ -1144,6 +1256,8 @@ export function searchGearCandidates(
           item.name.toLowerCase().includes(q) ||
           item.brand.toLowerCase().includes(q) ||
           item.model.toLowerCase().includes(q) ||
+          getItemCanonicalDisplayName(item).toLowerCase().includes(q) ||
+          item.rawKeys.some((rk) => rk.toLowerCase().includes(q)) ||
           (item.handleBrand?.toLowerCase().includes(q) ?? false) ||
           (item.gapOrSpec?.toLowerCase().includes(q) ?? false) ||
           (item.material?.toLowerCase().includes(q) ?? false)
@@ -1172,15 +1286,29 @@ export function suggestedNextBladeUseCount(
   baseBladeName: string,
   db: JournalDatabase
 ): number {
-  const targetNorm = normalizeKey(parseBladeUsage(baseBladeName).baseName);
+  const baseRaw = parseBladeUsage(baseBladeName).baseName;
+  const targetNorm = normalizeKey(baseRaw);
   if (!targetNorm) return 1;
+  const { override: targetOv } = resolveGear("刀片", baseRaw, db);
+  const targetOvNameNorm = normalizeKey(targetOv.name);
+  const targetCanonicalNorm = normalizeKey(
+    getOverrideCanonicalDisplayName(targetOv)
+  );
   for (const entry of db.entries ?? []) {
     for (const raw of getFieldValues(entry, ["刀片"])) {
       const parsed = parseBladeUsage(raw);
       const { override } = resolveGear("刀片", raw, db);
+      const entryBaseNorm = normalizeKey(parsed.baseName);
+      const entryOvNameNorm = normalizeKey(override.name);
+      const entryCanonicalNorm = normalizeKey(
+        getOverrideCanonicalDisplayName(override)
+      );
       if (
-        normalizeKey(parsed.baseName) === targetNorm ||
-        normalizeKey(override.name) === targetNorm
+        entryBaseNorm === targetNorm ||
+        entryOvNameNorm === targetNorm ||
+        entryOvNameNorm === targetOvNameNorm ||
+        entryCanonicalNorm === targetNorm ||
+        entryCanonicalNorm === targetCanonicalNorm
       ) {
         return (parsed.useCount ?? 1) + 1;
       }

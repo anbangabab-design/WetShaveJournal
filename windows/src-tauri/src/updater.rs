@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter};
 use url::Url;
 
 pub const GITHUB_REPO: &str = "anbangabab-design/WetShaveJournal";
-pub const CURRENT_VERSION: &str = "1.4.0";
+pub const CURRENT_VERSION: &str = "1.4.1";
 
 const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
 const MAX_CHECKSUMS_FILE_BYTES: usize = 1_048_576;

@@ -420,6 +420,24 @@ export interface GearAuditReport {
   failures: GearAuditBatchFailure[];
 }
 
+export interface AIHealthCheckSession {
+  schemaVersion: number;
+  savedAt: string;
+  scope: "currentCategory" | "allPending";
+  category?: GearCategory | null;
+  modelUsed: string | null;
+  plannedCount: number;
+  verifiedCount: number;
+  skippedCount: number;
+  unknownOrDuplicateIdCount: number;
+  retryRound: number;
+  updates: GearAuditUpdateProposal[];
+  merges: GearAuditMergeProposal[];
+  undeterminedItems: GearItem[];
+  failedItems: GearItem[];
+  batchFailures: GearAuditBatchFailure[];
+}
+
 // MARK: - 统计分析模型
 
 export interface RazorBladeComboStat {

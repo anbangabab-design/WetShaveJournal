@@ -45,6 +45,7 @@ final class JournalRepository {
     let dataDirectoryURL: URL
     let journalFileURL: URL
     let backupsDirectoryURL: URL
+    let aiHealthCheckSessionFileURL: URL
     /// 当使用 CloudStorage 云盘路径时要求挂载目录已存在，防止云盘未挂载时静默创建空库
     let requireMountedCloudRoot: Bool
 
@@ -97,7 +98,35 @@ final class JournalRepository {
         self.dataDirectoryURL = dataDirectoryURL
         self.journalFileURL = dataDirectoryURL.appendingPathComponent("journal.json")
         self.backupsDirectoryURL = dataDirectoryURL.appendingPathComponent("Backups", isDirectory: true)
+        self.aiHealthCheckSessionFileURL = dataDirectoryURL.appendingPathComponent("ai_health_check_session.json")
         self.requireMountedCloudRoot = requireMountedCloudRoot ?? dataDirectoryURL.path.contains("/Library/CloudStorage/")
+    }
+
+    // MARK: - AI 体检会话轻量持久化（ai_health_check_session.json）
+
+    func loadAIHealthCheckSession() -> AIHealthCheckSession? {
+        guard FileManager.default.fileExists(atPath: aiHealthCheckSessionFileURL.path),
+              let data = try? Data(contentsOf: aiHealthCheckSessionFileURL),
+              let session = try? JSONDecoder().decode(AIHealthCheckSession.self, from: data),
+              session.hasActionableRemainder else {
+            return nil
+        }
+        return session
+    }
+
+    func saveAIHealthCheckSession(_ session: AIHealthCheckSession) {
+        if !session.hasActionableRemainder {
+            clearAIHealthCheckSession()
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(session) else { return }
+        try? Self.atomicWriteData(data, to: aiHealthCheckSessionFileURL)
+    }
+
+    func clearAIHealthCheckSession() {
+        try? FileManager.default.removeItem(at: aiHealthCheckSessionFileURL)
     }
 
     /// 读取并解码 journal.json；若文件尚未创建返回 nil；若损坏/云盘未挂载抛出错误供上层进入只读保护

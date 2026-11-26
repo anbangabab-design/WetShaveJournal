@@ -2,11 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="1.4.0"
-BUILD_NUM="18"
+VERSION="1.4.1"
+BUILD_NUM="19"
 APP_NAME="WetShaveJournal"
+APP_DISPLAY_NAME="湿剃日记"
 ARCH_TAG="arm64"
 STAGE_DIR="/tmp/WetShaveJournal_stage"
+DMG_STAGE_DIR="/tmp/WetShaveJournal_dmg_stage"
 APP="${STAGE_DIR}/${APP_NAME}.app"
 SYS_APP="/Applications/${APP_NAME}.app"
 DRIVE_BACKUP_DIR="$(dirname "$SCRIPT_DIR")/WetShaveJournal_Backup"
@@ -57,7 +59,7 @@ cat << EOF > "$APP/Contents/Info.plist"
     <key>CFBundleIdentifier</key><string>com.personal.wetshavejournal</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleName</key><string>${APP_NAME}</string>
-    <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key><string>${APP_DISPLAY_NAME}</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key><string>${BUILD_NUM}</string>
@@ -76,39 +78,38 @@ else
 fi
 codesign --verify --deep --strict "$APP"
 
-echo "[4/5] Packaging .app, .zip, .pkg into ${OUTPUT_APP_DIR}..."
+echo "[4/5] Packaging .app, .zip, .dmg into ${OUTPUT_APP_DIR}..."
 mkdir -p "$OUTPUT_APP_DIR" "$OUTPUT_REL_DIR"
 rm -rf "$OUTPUT_APP_DIR/${APP_NAME}.app"
 ditto "$APP" "$OUTPUT_APP_DIR/${APP_NAME}.app"
 
 ZIP_PATH="$OUTPUT_APP_DIR/${APP_NAME}-${VERSION}-${ARCH_TAG}.zip"
-PKG_PATH="$OUTPUT_APP_DIR/${APP_NAME}-${VERSION}-${ARCH_TAG}.pkg"
-rm -f "$ZIP_PATH" "$PKG_PATH"
+DMG_PATH="$OUTPUT_APP_DIR/${APP_NAME}-${VERSION}-${ARCH_TAG}.dmg"
+rm -f "$ZIP_PATH" "$DMG_PATH"
 
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP_PATH"
 
-if [ -n "$PKG_SIGN_IDENTITY" ]; then
-  pkgbuild \
-    --component "$APP" \
-    --install-location "/Applications" \
-    --identifier "com.personal.wetshavejournal" \
-    --version "$VERSION" \
-    --sign "$PKG_SIGN_IDENTITY" \
-    --timestamp \
-    "$PKG_PATH"
-else
-  pkgbuild \
-    --component "$APP" \
-    --install-location "/Applications" \
-    --identifier "com.personal.wetshavejournal" \
-    --version "$VERSION" \
-    "$PKG_PATH"
+rm -rf "$DMG_STAGE_DIR"
+mkdir -p "$DMG_STAGE_DIR"
+ditto "$APP" "$DMG_STAGE_DIR/${APP_DISPLAY_NAME}.app"
+ln -s /Applications "$DMG_STAGE_DIR/Applications"
+
+hdiutil create \
+  -volname "${APP_DISPLAY_NAME} ${VERSION}" \
+  -srcfolder "$DMG_STAGE_DIR" \
+  -ov \
+  -format UDZO \
+  "$DMG_PATH"
+rm -rf "$DMG_STAGE_DIR"
+
+if [ "$APP_SIGN_IDENTITY" != "-" ]; then
+  codesign --force --timestamp --sign "$APP_SIGN_IDENTITY" "$DMG_PATH"
 fi
 
-if [ -n "$NOTARY_PROFILE" ] && [ "$APP_SIGN_IDENTITY" != "-" ] && [ -n "$PKG_SIGN_IDENTITY" ]; then
-  echo "Submitting ${PKG_PATH} for Apple notarization (profile: ${NOTARY_PROFILE})..."
-  xcrun notarytool submit "$PKG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
-  xcrun stapler staple "$PKG_PATH"
+if [ -n "$NOTARY_PROFILE" ] && [ "$APP_SIGN_IDENTITY" != "-" ]; then
+  echo "Submitting ${DMG_PATH} for Apple notarization (profile: ${NOTARY_PROFILE})..."
+  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$DMG_PATH"
 fi
 
 echo "[5/5] Packaging clean source archive..."
@@ -127,7 +128,7 @@ ditto -c -k --sequesterRsrc --keepParent "$TMP_SRC" "$SRC_ZIP_PATH"
 rm -rf "$TMP_SRC"
 
 if [ "$OUTPUT_REL_DIR" != "$OUTPUT_APP_DIR" ]; then
-  cp -f "$ZIP_PATH" "$PKG_PATH" "$SRC_ZIP_PATH" "$OUTPUT_REL_DIR/"
+  cp -f "$ZIP_PATH" "$DMG_PATH" "$SRC_ZIP_PATH" "$OUTPUT_REL_DIR/"
 fi
 
 # 尝试同步更新 /Applications/WetShaveJournal.app（若权限允许）
@@ -142,8 +143,8 @@ echo "Build & packaging complete (v${VERSION}, Build ${BUILD_NUM}):"
 echo "  Signing: $([ "$APP_SIGN_IDENTITY" = "-" ] && echo "ad-hoc (local build only)" || echo "$APP_SIGN_IDENTITY")"
 echo "  App:     $OUTPUT_APP_DIR/${APP_NAME}.app"
 echo "  Zip:     $ZIP_PATH"
-echo "  Pkg:     $PKG_PATH"
+echo "  Dmg:     $DMG_PATH"
 echo "  Source:  $SRC_ZIP_PATH"
 echo ""
 echo "SHA-256 checksums:"
-shasum -a 256 "$PKG_PATH" "$ZIP_PATH" "$SRC_ZIP_PATH"
+shasum -a 256 "$DMG_PATH" "$ZIP_PATH" "$SRC_ZIP_PATH"

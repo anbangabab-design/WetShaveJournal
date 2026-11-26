@@ -519,7 +519,7 @@ final class UpdateService: NSObject, ObservableObject {
             let fm = FileManager.default
             let downloadsDir = downloadsDirectoryProvider()
             let safeName = (asset.name as NSString).lastPathComponent
-            let destURL = downloadsDir.appendingPathComponent(safeName.isEmpty ? "WetShaveJournal-Update.pkg" : safeName)
+            let destURL = downloadsDir.appendingPathComponent(safeName.isEmpty ? "WetShaveJournal-Update.dmg" : safeName)
             do {
                 try fm.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
                 if fm.fileExists(atPath: destURL.path) {

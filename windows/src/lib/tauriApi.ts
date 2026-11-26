@@ -5,6 +5,7 @@ import type {
   AiChatRequestPayload,
   AiChatResponsePayload,
   AiConnectionTestResponse,
+  AIHealthCheckSession,
   AppConfigInfo,
   BackupResponse,
   BrandLogoFetchResponse,
@@ -108,6 +109,20 @@ export async function exportCsvFile(
   content: string
 ): Promise<string> {
   return invoke<string>("export_csv", { targetPath, content });
+}
+
+export async function loadAiHealthCheckSession(): Promise<AIHealthCheckSession | null> {
+  return invoke<AIHealthCheckSession | null>("load_ai_health_check_session");
+}
+
+export async function saveAiHealthCheckSession(
+  session: AIHealthCheckSession
+): Promise<void> {
+  return invoke<void>("save_ai_health_check_session", { session });
+}
+
+export async function clearAiHealthCheckSession(): Promise<void> {
+  return invoke<void>("clear_ai_health_check_session");
 }
 
 export async function setCloudSyncDir(

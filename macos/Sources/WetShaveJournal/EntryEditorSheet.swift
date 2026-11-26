@@ -54,6 +54,7 @@ struct EntryEditorSheet: View {
     @State private var irritation: IrritationLevel = .painless
     @State private var processNote: String = ""
     @State private var saveErrorMessage: String? = nil
+    @State private var selectedGearBindings: [GearCategory: (text: String, item: GearItem)] = [:]
 
     private var isAdjustableRazor: Bool {
         store.isRazorAdjustable(razor)
@@ -290,7 +291,10 @@ struct EntryEditorSheet: View {
                                 title: GearCategory.razor.singularName,
                                 category: .razor,
                                 text: $razor,
-                                placeholder: L10n.t("搜索或输入剃须刀...", "Search or enter razor...")
+                                placeholder: L10n.t("搜索或输入剃须刀...", "Search or enter razor..."),
+                                onSelectItem: { selected, inserted in
+                                    selectedGearBindings[.razor] = (inserted, selected)
+                                }
                             )
 
                             VStack(alignment: .leading, spacing: 8) {
@@ -299,8 +303,9 @@ struct EntryEditorSheet: View {
                                     category: .blade,
                                     text: $bladeBase,
                                     placeholder: L10n.t("搜索或输入刀片...", "Search or enter blade..."),
-                                    onSelectItem: { selected in
-                                        bladeUseCount = store.suggestedNextUseCount(forBlade: selected.name)
+                                    onSelectItem: { selected, inserted in
+                                        selectedGearBindings[.blade] = (inserted, selected)
+                                        bladeUseCount = store.suggestedNextUseCount(forBlade: inserted)
                                     }
                                 )
 
@@ -331,7 +336,10 @@ struct EntryEditorSheet: View {
                                 title: GearCategory.brush.singularName,
                                 category: .brush,
                                 text: $brush,
-                                placeholder: L10n.t("搜索或输入剃须刷...", "Search or enter brush...")
+                                placeholder: L10n.t("搜索或输入剃须刷...", "Search or enter brush..."),
+                                onSelectItem: { selected, inserted in
+                                    selectedGearBindings[.brush] = (inserted, selected)
+                                }
                             )
 
                             HStack(alignment: .top, spacing: 14) {
@@ -339,13 +347,19 @@ struct EntryEditorSheet: View {
                                     title: GearCategory.soap.singularName,
                                     category: .soap,
                                     text: $soap,
-                                    placeholder: L10n.t("搜索或输入剃须皂...", "Search or enter soap...")
+                                    placeholder: L10n.t("搜索或输入剃须皂...", "Search or enter soap..."),
+                                    onSelectItem: { selected, inserted in
+                                        selectedGearBindings[.soap] = (inserted, selected)
+                                    }
                                 )
                                 GearAutocompleteField(
                                     title: GearCategory.bowl.singularName,
                                     category: .bowl,
                                     text: $bowlName,
-                                    placeholder: L10n.t("选填...", "Optional...")
+                                    placeholder: L10n.t("选填...", "Optional..."),
+                                    onSelectItem: { selected, inserted in
+                                        selectedGearBindings[.bowl] = (inserted, selected)
+                                    }
                                 )
                             }
 
@@ -354,13 +368,19 @@ struct EntryEditorSheet: View {
                                     title: GearCategory.preShave.singularName,
                                     category: .preShave,
                                     text: $preShave,
-                                    placeholder: L10n.t("选填...", "Optional...")
+                                    placeholder: L10n.t("选填...", "Optional..."),
+                                    onSelectItem: { selected, inserted in
+                                        selectedGearBindings[.preShave] = (inserted, selected)
+                                    }
                                 )
                                 GearAutocompleteField(
                                     title: GearCategory.afterShave.singularName,
                                     category: .afterShave,
                                     text: $afterShave,
-                                    placeholder: L10n.t("选填...", "Optional...")
+                                    placeholder: L10n.t("选填...", "Optional..."),
+                                    onSelectItem: { selected, inserted in
+                                        selectedGearBindings[.afterShave] = (inserted, selected)
+                                    }
                                 )
                             }
                         }
@@ -1005,7 +1025,21 @@ struct EntryEditorSheet: View {
             sourceFingerprint: editingEntry?.sourceFingerprint,
             locallyModified: true
         )
-        switch store.upsertEntry(entry) {
+        let currentFieldValues: [GearCategory: String] = [
+            .razor: razor.trimmingCharacters(in: .whitespacesAndNewlines),
+            .blade: bladeBase.trimmingCharacters(in: .whitespacesAndNewlines),
+            .brush: brush.trimmingCharacters(in: .whitespacesAndNewlines),
+            .soap: soap.trimmingCharacters(in: .whitespacesAndNewlines),
+            .bowl: cleanBowl,
+            .preShave: cleanPre,
+            .afterShave: cleanAfter
+        ]
+        let activeBindings: [(category: GearCategory, insertedText: String, item: GearItem)] = selectedGearBindings.compactMap { cat, pair in
+            guard let current = currentFieldValues[cat], current == pair.text else { return nil }
+            return (cat, pair.text, pair.item)
+        }
+
+        switch store.upsertEntry(entry, selectedGearBindings: activeBindings) {
         case .success:
             store.showToast(L10n.t("已保存 SOTD 日记", "Saved SOTD entry"), isLoading: false)
             onSaved?(entry)
@@ -1024,7 +1058,7 @@ struct GearAutocompleteField: View {
     let category: GearCategory
     @Binding var text: String
     var placeholder: String
-    var onSelectItem: ((GearItem) -> Void)? = nil
+    var onSelectItem: ((GearItem, String) -> Void)? = nil
 
     @State private var isExpanded: Bool = false
     @State private var isHoveringDropdown: Bool = false
@@ -1087,10 +1121,11 @@ struct GearAutocompleteField: View {
                 Menu {
                     ForEach(allItems.prefix(40)) { item in
                         Button {
-                            text = item.name
+                            let inserted = GearCatalogService.autocompleteInsertText(for: item, in: allItems)
+                            text = inserted
                             isExpanded = false
                             isFocused = false
-                            onSelectItem?(item)
+                            onSelectItem?(item, inserted)
                         } label: {
                             Text("[\(L10n.brandDisplay(item.brand))] \(item.model) (\(item.count))")
                         }
@@ -1124,11 +1159,12 @@ struct GearAutocompleteField: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(candidates) { item in
                         Button {
-                            text = item.name
+                            let inserted = GearCatalogService.autocompleteInsertText(for: item, in: allItems)
+                            text = inserted
                             isHoveringDropdown = false
                             isExpanded = false
                             isFocused = false
-                            onSelectItem?(item)
+                            onSelectItem?(item, inserted)
                         } label: {
                             HStack(spacing: 8) {
                                 BrandAvatarView(brand: item.brand, size: 19, category: category)

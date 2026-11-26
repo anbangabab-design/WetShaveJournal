@@ -71,6 +71,23 @@ enum GearMutationService {
         } else if rawKeys.isEmpty && !candidate.pending.contains(newNormKey) {
             candidate.pending.append(newNormKey)
         }
+        let canonicalDisplayKey = "\(category.rawValue)|\(GearKnowledgeBase.normalizeKey(normalizedOverride.canonicalDisplayName))"
+        if canonicalDisplayKey != newNormKey {
+            let existingAtCanonical = candidate.overrides[canonicalDisplayKey]
+            let sameIdentityOrEmpty: Bool = {
+                guard let ex = existingAtCanonical else { return true }
+                return ex.brand.lowercased() == normalizedOverride.brand.lowercased()
+                    && ex.name.lowercased() == normalizedOverride.name.lowercased()
+                    && GearCatalogService.variantSignature(category: category, override: ex)
+                        == GearCatalogService.variantSignature(category: category, override: normalizedOverride)
+            }()
+            if sameIdentityOrEmpty {
+                candidate.overrides[canonicalDisplayKey] = normalizedOverride
+                if clearPending {
+                    candidate.pending.removeAll { $0 == canonicalDisplayKey }
+                }
+            }
+        }
 
         return GearMutationPlan(
             database: candidate,
@@ -425,6 +442,12 @@ enum GearMutationService {
             candidate.overrides[newNormKey] = ov
             updatedRawKeySets.insert(newNormKey)
             if u.confidence >= 0.72 { candidate.pending.removeAll { $0 == newNormKey } }
+            let canonicalDisplayKey = "\(u.item.category.rawValue)|\(GearKnowledgeBase.normalizeKey(ov.canonicalDisplayName))"
+            if canonicalDisplayKey != newNormKey, candidate.overrides[canonicalDisplayKey] == nil {
+                candidate.overrides[canonicalDisplayKey] = ov
+                updatedRawKeySets.insert(canonicalDisplayKey)
+                if u.confidence >= 0.72 { candidate.pending.removeAll { $0 == canonicalDisplayKey } }
+            }
             appliedUpdates += 1
         }
 

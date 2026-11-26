@@ -264,7 +264,7 @@ struct JournalView: View {
                     }
                 }
             }
-            .frame(minWidth: 330, idealWidth: 380, maxWidth: 450, maxHeight: .infinity, alignment: .top)
+            .frame(minWidth: 280, idealWidth: 320, maxWidth: 380, maxHeight: .infinity, alignment: .top)
 
             // 右侧：SOTD 详情面板
             if let entry = activeEntry {
@@ -380,26 +380,65 @@ private struct EntryRowCard: View {
     let entry: JournalEntry
     let isSelected: Bool
 
+    private struct RowGearSlot: Identifiable {
+        let id: String
+        let category: GearCategory
+        let brand: String
+        let shortName: String
+        let fullLabel: String
+    }
+
+    private func buildGearSlots() -> [RowGearSlot] {
+        var slots: [RowGearSlot] = []
+
+        func appendSlot(category: GearCategory, rawValue: String) {
+            let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != "无", trimmed != "-" else { return }
+            let (_, ov) = store.resolveGear(category: category, rawValue: trimmed)
+            let displayModel = ov.displayModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortName = displayModel.isEmpty ? ov.name : displayModel
+            let brandText = L10n.brandDisplay(ov.brand)
+            let isGenericBrand = ov.brand.isEmpty || ov.brand == "品牌未注明" || ov.brand == "无品牌" || ov.brand == "仿刀"
+            let fullLabel: String
+            if isGenericBrand || shortName.lowercased().hasPrefix(brandText.lowercased()) {
+                fullLabel = "\(category.singularName)：\(shortName)"
+            } else {
+                fullLabel = "\(category.singularName)：\(brandText) \(shortName)"
+            }
+            slots.append(
+                RowGearSlot(
+                    id: category.rawValue,
+                    category: category,
+                    brand: ov.brand,
+                    shortName: shortName,
+                    fullLabel: fullLabel
+                )
+            )
+        }
+
+        appendSlot(category: .razor, rawValue: entry.primaryRazor)
+        appendSlot(category: .brush, rawValue: entry.brush)
+        appendSlot(category: .soap, rawValue: entry.soap)
+        appendSlot(category: .afterShave, rawValue: entry.afterShave)
+        return slots
+    }
+
     var body: some View {
         let proc = store.parsedProcess(for: entry)
-        let hasRazor = !entry.primaryRazor.isEmpty
-        let (_, razorOv) = store.resolveGear(category: .razor, rawValue: entry.primaryRazor)
-        let hasBlade = !entry.primaryBlade.isEmpty
-        let hasSoap = !entry.soap.isEmpty
-        let (_, soapOv) = store.resolveGear(category: .soap, rawValue: entry.soap)
+        let gearSlots = buildGearSlots()
 
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .center) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 6) {
                 Text(entry.date)
-                    .font(.system(size: 13.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(isSelected ? ShaveTheme.accent : .secondary)
+                    .font(.system(size: 11.5, weight: .regular))
+                    .foregroundStyle(isSelected ? ShaveTheme.accent.opacity(0.85) : .secondary.opacity(0.85))
                 if entry.hasSyncConflict == true {
                     TagPill(text: L10n.t("同步冲突", "Conflict"), color: ShaveTheme.crimson)
                 } else if entry.suspectedDuplicate == true {
                     TagPill(text: L10n.t("疑似重复", "Dup?"), color: ShaveTheme.amber)
                 }
-                Spacer()
-                HStack(spacing: 5) {
+                Spacer(minLength: 4)
+                HStack(spacing: 4) {
                     if let irr = proc.irritation {
                         TagPill(text: irr.displayName, color: ShaveTheme.irritationColor(irr))
                     }
@@ -409,52 +448,43 @@ private struct EntryRowCard: View {
                 }
             }
 
-            if hasRazor {
-                HStack(spacing: 8) {
-                    BrandAvatarView(brand: razorOv.brand, size: 20)
-                    Text(L10n.brandDisplay(razorOv.brand))
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(razorOv.displayModel)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                }
-            } else {
-                Text(L10n.t("未记录剃须刀", "No razor recorded"))
-                    .font(.system(size: 14, weight: .medium))
+            if gearSlots.isEmpty {
+                Text(L10n.t("未记录装备", "No gear recorded"))
+                    .font(.system(size: 12.5, weight: .regular))
                     .foregroundStyle(.secondary)
-            }
-
-            if hasBlade || hasSoap {
-                HStack(spacing: 6) {
-                    if hasBlade {
-                        Text(entry.primaryBlade)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    if hasBlade && hasSoap {
-                        Text("·")
-                            .foregroundStyle(.tertiary)
-                    }
-                    if hasSoap {
-                        Text(soapOv.name)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+            } else {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(minimum: 0), spacing: 8, alignment: .leading),
+                        GridItem(.flexible(minimum: 0), spacing: 8, alignment: .leading)
+                    ],
+                    alignment: .leading,
+                    spacing: 7
+                ) {
+                    ForEach(gearSlots) { slot in
+                        HStack(spacing: 6) {
+                            BrandAvatarView(brand: slot.brand, size: 17, category: slot.category)
+                            Text(slot.shortName)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .help(slot.fullLabel)
                     }
                 }
             }
         }
-        .padding(14)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(isSelected ? ShaveTheme.accentSoft : ShaveTheme.cardBackground(scheme))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isSelected ? ShaveTheme.accent.opacity(0.50) : ShaveTheme.cardBorder(scheme), lineWidth: isSelected ? 1.4 : 1)
         )
         .contentShape(Rectangle())
@@ -470,8 +500,51 @@ private struct EntryDetailPane: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
 
+    @State private var setupGridWidth: CGFloat = 600
+
+    private struct SetupTileEntry: Identifiable {
+        let id: String
+        let category: GearCategory
+        let rawValue: String
+    }
+
+    /// 按「剃须刀/刀片、剃须刷/剃须皂、须前/须后、剃须碗」双列配对顺序编排本日装备
+    private func buildPairedSetupTiles() -> [SetupTileEntry] {
+        var list: [SetupTileEntry] = []
+        let razors = entry.fieldValues(matching: ["剃须刀"])
+        let blades = entry.fieldValues(matching: ["刀片"])
+        let maxPair = max(razors.count, blades.count)
+        for idx in 0..<maxPair {
+            if idx < razors.count {
+                list.append(SetupTileEntry(id: "razor-\(idx)-\(razors[idx])", category: .razor, rawValue: razors[idx]))
+            }
+            if idx < blades.count {
+                list.append(SetupTileEntry(id: "blade-\(idx)-\(blades[idx])", category: .blade, rawValue: blades[idx]))
+            }
+        }
+        if !entry.brush.isEmpty {
+            list.append(SetupTileEntry(id: "brush-\(entry.brush)", category: .brush, rawValue: entry.brush))
+        }
+        if !entry.soap.isEmpty {
+            list.append(SetupTileEntry(id: "soap-\(entry.soap)", category: .soap, rawValue: entry.soap))
+        }
+        if !entry.preShave.isEmpty && entry.preShave != "无" {
+            list.append(SetupTileEntry(id: "preshave-\(entry.preShave)", category: .preShave, rawValue: entry.preShave))
+        }
+        if !entry.afterShave.isEmpty && entry.afterShave != "无" {
+            list.append(SetupTileEntry(id: "aftershave-\(entry.afterShave)", category: .afterShave, rawValue: entry.afterShave))
+        }
+        if !entry.bowl.isEmpty {
+            list.append(SetupTileEntry(id: "bowl-\(entry.bowl)", category: .bowl, rawValue: entry.bowl))
+        }
+        return list
+    }
+
     var body: some View {
         let proc = store.parsedProcess(for: entry)
+        let setupTiles = buildPairedSetupTiles()
+        let setupColumnCount = setupGridWidth >= 480 ? 2 : 1
+        let setupColumns = Array(repeating: GridItem(.flexible(), spacing: 12), count: setupColumnCount)
 
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -521,34 +594,31 @@ private struct EntryDetailPane: View {
                     }
                 }
 
-                // 器材组合卡片网格
+                // 器材组合双列配对网格（窄窗自动回退单列）
                 SectionCard {
                     VStack(alignment: .leading, spacing: 16) {
                         Text(L10n.t("本日装备", "Setup"))
                             .font(.system(size: 16, weight: .semibold))
 
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 255), spacing: 14)], spacing: 14) {
-                            ForEach(entry.fieldValues(matching: ["剃须刀"]), id: \.self) { raw in
-                                GearMiniTile(category: .razor, rawValue: raw)
+                        if setupTiles.isEmpty {
+                            Text(L10n.t("本篇未记录装备信息", "No gear recorded for this entry"))
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            LazyVGrid(columns: setupColumns, spacing: 12) {
+                                ForEach(setupTiles) { tile in
+                                    GearMiniTile(category: tile.category, rawValue: tile.rawValue)
+                                }
                             }
-                            ForEach(entry.fieldValues(matching: ["刀片"]), id: \.self) { raw in
-                                GearMiniTile(category: .blade, rawValue: raw)
-                            }
-                            if !entry.brush.isEmpty {
-                                GearMiniTile(category: .brush, rawValue: entry.brush)
-                            }
-                            if !entry.soap.isEmpty {
-                                GearMiniTile(category: .soap, rawValue: entry.soap)
-                            }
-                            if !entry.bowl.isEmpty {
-                                GearMiniTile(category: .bowl, rawValue: entry.bowl)
-                            }
-                            if !entry.preShave.isEmpty && entry.preShave != "无" {
-                                GearMiniTile(category: .preShave, rawValue: entry.preShave)
-                            }
-                            if !entry.afterShave.isEmpty && entry.afterShave != "无" {
-                                GearMiniTile(category: .afterShave, rawValue: entry.afterShave)
-                            }
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear
+                                        .onAppear { setupGridWidth = geo.size.width }
+                                        .onChange(of: geo.size.width) { _, newWidth in
+                                            setupGridWidth = newWidth
+                                        }
+                                }
+                            )
                         }
                     }
                 }
@@ -637,67 +707,88 @@ private struct GearMiniTile: View {
         let (_, ov) = store.resolveGear(category: category, rawValue: rawValue)
         let bladeParsed = category == .blade ? GearKnowledgeBase.parseBladeUsage(rawValue) : (rawValue, nil)
         let specTags = GearSpecFormatter.specTags(category: category, override: ov, includeSampleTag: true)
+        let resolvedRazorType = category == .razor
+            ? (ov.razorType ?? GearKnowledgeBase.inferRazorType(from: ov.name))
+            : nil
+        let resolvedBladeType = category == .blade
+            ? (ov.bladeType ?? GearKnowledgeBase.inferBladeType(from: ov.name))
+            : nil
 
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 6) {
-                Text(category.singularName)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let use = bladeParsed.1 {
-                    TagPill(text: L10n.isEnglish ? L10n.ordinal(use) : "第 \(use) 次", color: ShaveTheme.accent)
+        ZStack(alignment: .bottomTrailing) {
+            GearSilhouetteView(
+                category: category,
+                razorType: resolvedRazorType,
+                bladeType: resolvedBladeType,
+                size: 70
+            )
+            .padding(.trailing, 6)
+            .padding(.bottom, 2)
+
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(spacing: 6) {
+                    Text(category.singularName)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let use = bladeParsed.1 {
+                        TagPill(text: L10n.isEnglish ? L10n.ordinal(use) : "第 \(use) 次", color: ShaveTheme.accent)
+                    }
                 }
-            }
 
-            HStack(alignment: .center, spacing: 8) {
-                BrandAvatarView(brand: ov.brand, size: 22, category: category)
-                VStack(alignment: .leading, spacing: 1.5) {
-                    HStack(spacing: 5) {
-                        Text(L10n.brandDisplay(ov.brand))
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        if category == .brush, let hb = ov.handleBrand, !hb.isEmpty {
-                            Text("×")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                            Text(L10n.handleTag(hb))
+                HStack(alignment: .center, spacing: 8) {
+                    BrandAvatarView(brand: ov.brand, size: 22, category: category)
+                    VStack(alignment: .leading, spacing: 1.5) {
+                        HStack(spacing: 5) {
+                            Text(L10n.brandDisplay(ov.brand))
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                            if category == .brush, let hb = ov.handleBrand, !hb.isEmpty {
+                                Text("×")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.tertiary)
+                                Text(L10n.handleTag(hb))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                         }
-                    }
-                    HStack(spacing: 6) {
-                        Text(ov.displayModel)
-                            .font(.system(size: 14.5, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        if category == .brush, let ks = ov.knotSize, !ks.isEmpty {
-                            Text(ks)
-                                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                .padding(.horizontal, 6.5)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(ShaveTheme.accentSoft))
-                                .foregroundStyle(ShaveTheme.accent)
+                        HStack(spacing: 6) {
+                            Text(ov.displayModel)
+                                .font(.system(size: 14.5, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            if category == .brush, let ks = ov.knotSize, !ks.isEmpty {
+                                Text(ks)
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .padding(.horizontal, 6.5)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(ShaveTheme.accentSoft))
+                                    .foregroundStyle(ShaveTheme.accent)
+                            }
                         }
                     }
                 }
-            }
+                .padding(.trailing, 34)
 
-            if !specTags.isEmpty {
-                FlowLayout(spacing: 5, lineSpacing: 5) {
-                    ForEach(Array(specTags.enumerated()), id: \.offset) { _, tag in
-                        TagPill(text: tag, neutral: true)
+                if !specTags.isEmpty {
+                    FlowLayout(spacing: 5, lineSpacing: 5) {
+                        ForEach(Array(specTags.enumerated()), id: \.offset) { _, tag in
+                            TagPill(text: tag, neutral: true)
+                        }
                     }
+                    .padding(.trailing, 30)
                 }
             }
+            .padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 92, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(ShaveTheme.subtleSurface(scheme))
         )
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 }
 

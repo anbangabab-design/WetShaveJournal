@@ -632,7 +632,7 @@ enum UpdateReleaseParser {
         return false
     }
 
-    /// 筛选符合来源白名单、架构与版本约束的 macOS 安装包（优先 arm64/universal 的 .dmg/.pkg）
+    /// 筛选符合来源白名单、架构与版本约束的 macOS 安装包（严格优先 arm64/universal 的 .dmg，其次 .pkg / .zip）
     nonisolated static func selectPreferredAsset(
         from assets: [GitHubReleaseAsset],
         expectedVersion: String = "",
@@ -650,15 +650,18 @@ enum UpdateReleaseParser {
         func isArchMatch(_ name: String) -> Bool {
             name.contains("arm64") || name.contains("aarch64") || name.contains("universal")
         }
-        func isInstaller(_ name: String) -> Bool {
-            name.hasSuffix(".dmg") || name.hasSuffix(".pkg")
-        }
 
-        if let preferred = validAssets.first(where: { let n = $0.name.lowercased(); return isInstaller(n) && isArchMatch(n) }) {
-            return preferred
+        if let preferredDmg = validAssets.first(where: { let n = $0.name.lowercased(); return n.hasSuffix(".dmg") && isArchMatch(n) }) {
+            return preferredDmg
         }
-        if let installer = validAssets.first(where: { isInstaller($0.name.lowercased()) }) {
-            return installer
+        if let dmg = validAssets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) {
+            return dmg
+        }
+        if let preferredPkg = validAssets.first(where: { let n = $0.name.lowercased(); return n.hasSuffix(".pkg") && isArchMatch(n) }) {
+            return preferredPkg
+        }
+        if let pkg = validAssets.first(where: { $0.name.lowercased().hasSuffix(".pkg") }) {
+            return pkg
         }
         if let archZip = validAssets.first(where: { let n = $0.name.lowercased(); return n.hasSuffix(".zip") && isArchMatch(n) }) {
             return archZip

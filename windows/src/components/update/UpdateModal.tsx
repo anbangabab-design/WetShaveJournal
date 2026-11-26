@@ -16,7 +16,7 @@ import {
 import { useJournal } from "../../store/JournalContext";
 import { TagPill } from "../ui/TagPill";
 
-const CURRENT_APP_VERSION = "1.4.0";
+const CURRENT_APP_VERSION = "1.4.1";
 
 export const UpdateModal: React.FC = () => {
   const {

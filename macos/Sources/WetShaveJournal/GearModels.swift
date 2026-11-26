@@ -548,6 +548,31 @@ struct GearOverride: Codable, Hashable {
         return n
     }
 
+    static func formatCanonicalDisplayName(brand: String, model: String, fallbackName: String) -> String {
+        let cleanBrand = brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanFallback = fallbackName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveModel = cleanModel.isEmpty ? cleanFallback : cleanModel
+        guard !effectiveModel.isEmpty else { return cleanBrand }
+
+        let isGenericBrand = cleanBrand.isEmpty
+            || cleanBrand == "品牌未注明"
+            || cleanBrand == "无品牌"
+            || cleanBrand == "仿刀"
+        if isGenericBrand {
+            return effectiveModel
+        }
+        if effectiveModel.lowercased().hasPrefix(cleanBrand.lowercased()) {
+            return effectiveModel
+        }
+        return "\(cleanBrand) \(effectiveModel)"
+    }
+
+    /// 规范显示名（所见即所得，与联想下拉显示的「品牌 + 型号」保持一致，如 `Feather New Hi-Stainless`）
+    var canonicalDisplayName: String {
+        Self.formatCanonicalDisplayName(brand: brand, model: displayModel, fallbackName: name)
+    }
+
     /// 确定性属性指纹（用于异步 AI 请求返回前的并发修改核对）
     var fingerprint: String {
         let parts: [String] = [
@@ -630,7 +655,7 @@ struct GearHistorySnapshot: Codable, Hashable {
 
 // MARK: - 运行时聚合器材项
 
-struct GearItem: Identifiable, Hashable {
+struct GearItem: Identifiable, Hashable, Codable {
     var id: String
     var category: GearCategory
     var canonicalKey: String
@@ -661,6 +686,11 @@ struct GearItem: Identifiable, Hashable {
     var notes: String?
     var recognizedSource: String?
     var isManuallyConfirmed: Bool = false
+
+    /// 规范显示名（所见即所得，与联想列表展示一致）
+    var canonicalDisplayName: String {
+        GearOverride.formatCanonicalDisplayName(brand: brand, model: model, fallbackName: name)
+    }
 
     var snapshotFingerprint: String {
         let parts: [String] = [

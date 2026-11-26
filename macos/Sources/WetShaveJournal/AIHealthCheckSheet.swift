@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// AI 功能 ①：全库 AI 体检 + 联网纠错 + 疑似重复合并建议 Diff 弹窗（S08：逐项状态统计 + 有限重试 + 支持取消）
+/// AI 功能 ①：全库 AI 体检 + 联网纠错 + 疑似重复合并建议 Diff 弹窗
+/// v1.4.1：支持会话持久化至 ai_health_check_session.json、关闭/重启断点续做、应用勾选后不关闭弹窗且保留未勾选与失败批次
 struct AIHealthCheckSheet: View {
     @EnvironmentObject var store: JournalStore
     @Environment(\.dismiss) private var dismiss
@@ -20,10 +21,13 @@ struct AIHealthCheckSheet: View {
     @State private var isAuditing: Bool = false
     @State private var auditTask: Task<Void, Never>? = nil
     @State private var errorMessage: String? = nil
+    @State private var infoBannerMessage: String? = nil
     @State private var modelUsed: String? = nil
     @State private var updates: [GearAuditUpdateProposal] = []
     @State private var merges: [GearAuditMergeProposal] = []
     @State private var hasCompleted: Bool = false
+    @State private var resumedFromDisk: Bool = false
+    @State private var hasLoadedSession: Bool = false
 
     // S08 细粒度体检统计与未完成项追踪
     @State private var plannedCount: Int = 0
@@ -47,7 +51,7 @@ struct AIHealthCheckSheet: View {
     }
 
     private var retryableItems: [GearItem] {
-        failedItems + undeterminedItems
+        failedItems.isEmpty ? undeterminedItems : failedItems
     }
 
     private var selectedCount: Int {
@@ -59,9 +63,14 @@ struct AIHealthCheckSheet: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(L10n.t("AI 器材库体检", "AI Gear Audit"))
-                        .font(.system(size: 20, weight: .bold))
-                    Text(L10n.t("核验官网命名、补齐缺失参数、识别疑似重复条目；确认勾选后再写入", "Verify naming, fill missing specs, and spot duplicates. Review diffs before applying."))
+                    HStack(spacing: 8) {
+                        Text(L10n.t("AI 器材库体检", "AI Gear Audit"))
+                            .font(.system(size: 20, weight: .bold))
+                        if resumedFromDisk && hasCompleted {
+                            TagPill(text: L10n.t("已恢复上次进度", "Resumed Session"), color: ShaveTheme.forest)
+                        }
+                    }
+                    Text(L10n.t("核验官网命名、补齐缺失参数、识别疑似重复条目；应用勾选后保留剩余项与失败批次，支持断点续做", "Verify naming, fill missing specs, and spot duplicates. Remaining items and failed batches stay preserved across sessions."))
                         .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
                 }
@@ -93,7 +102,7 @@ struct AIHealthCheckSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 12).fill(ShaveTheme.accentSoft))
                 } else {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 10) {
                         Picker("Scope", selection: $scope) {
                             Text(L10n.t("当前分类：\(initialCategory.displayName) (\(store.gearItems(for: initialCategory).count))", "Current: \(initialCategory.displayName) (\(store.gearItems(for: initialCategory).count))"))
                                 .tag(AuditScope.currentCategory)
@@ -102,6 +111,7 @@ struct AIHealthCheckSheet: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        .disabled(isAuditing)
 
                         if isAuditing {
                             Button(L10n.t("取消体检", "Cancel")) {
@@ -109,10 +119,17 @@ struct AIHealthCheckSheet: View {
                             }
                             .buttonStyle(.bordered)
                         } else {
+                            if hasCompleted {
+                                Button(L10n.t("清空记录", "Clear Session")) {
+                                    clearSession()
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
                             Button {
                                 startAuditTask()
                             } label: {
-                                Text(L10n.t("开始 AI 体检", "Start Audit"))
+                                Text(hasCompleted ? L10n.t("重新体检", "Re-Audit") : L10n.t("开始 AI 体检", "Start Audit"))
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(ShaveTheme.accent)
@@ -122,9 +139,37 @@ struct AIHealthCheckSheet: View {
                 }
 
                 if let err = errorMessage {
-                    Text(err)
-                        .font(.system(size: 13))
-                        .foregroundStyle(ShaveTheme.crimson)
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(ShaveTheme.crimson)
+                        Text(err)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(ShaveTheme.crimson)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(ShaveTheme.crimson.opacity(0.08)))
+                }
+
+                if let info = infoBannerMessage {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(ShaveTheme.forest)
+                        Text(info)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Button {
+                            infoBannerMessage = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(ShaveTheme.forest.opacity(0.10)))
                 }
 
                 if hasCompleted || isAuditing {
@@ -152,7 +197,9 @@ struct AIHealthCheckSheet: View {
                                 Label(
                                     retryRound >= Self.maxRetryRounds
                                         ? L10n.t("已达重试上限 (\(Self.maxRetryRounds))", "Retry Limit (\(Self.maxRetryRounds))")
-                                        : L10n.t("重试未完成项 (\(retryableItems.count))", "Retry Incomplete (\(retryableItems.count))"),
+                                        : (!failedItems.isEmpty
+                                            ? L10n.t("仅重试失败项 (\(failedItems.count))", "Retry Failed Only (\(failedItems.count))")
+                                            : L10n.t("重试待确认项 (\(undeterminedItems.count))", "Retry Uncertain (\(undeterminedItems.count))")),
                                     systemImage: "arrow.clockwise"
                                 )
                                 .font(.system(size: 12.5, weight: .semibold))
@@ -205,25 +252,25 @@ struct AIHealthCheckSheet: View {
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if hasCompleted && updates.isEmpty && merges.isEmpty && retryableItems.isEmpty {
+                } else if hasCompleted && updates.isEmpty && merges.isEmpty && failedItems.isEmpty && undeterminedItems.isEmpty {
                     VStack(spacing: 10) {
                         Spacer()
                         Image(systemName: "checkmark.seal.fill")
                             .font(.system(size: 34))
                             .foregroundStyle(ShaveTheme.forest)
-                        Text(L10n.t("全部器材命名与参数均很规范，暂未发现需要修正或合并的条目", "All checked items look clean — no fixes or merges needed."))
+                        Text(L10n.t("全部器材命名与参数已处理完毕，暂未发现需要修正或合并的条目", "All checked items look clean — no fixes or merges remaining."))
                             .font(.system(size: 14))
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if hasCompleted && updates.isEmpty && merges.isEmpty && !retryableItems.isEmpty {
+                } else if hasCompleted && updates.isEmpty && merges.isEmpty && (!failedItems.isEmpty || !undeterminedItems.isEmpty) {
                     VStack(spacing: 10) {
                         Spacer()
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 34))
                             .foregroundStyle(ShaveTheme.amber)
-                        Text(L10n.t("部分或全部器材未能完成核验（失败 \(failedItems.count)、无法判断 \(undeterminedItems.count)），请查看原因或点击重试", "Some items could not be verified (\(failedItems.count) failed, \(undeterminedItems.count) uncertain). Review reasons or retry."))
+                        Text(L10n.t("待应用修改已全部处理，仍有未完成核验项（失败 \(failedItems.count)、无法判断 \(undeterminedItems.count)），可直接点击上方「仅重试失败项」", "No pending diffs left, but \(failedItems.count) failed and \(undeterminedItems.count) uncertain item(s) remain. Click Retry above to continue."))
                             .font(.system(size: 14))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -235,14 +282,32 @@ struct AIHealthCheckSheet: View {
                         VStack(alignment: .leading, spacing: 18) {
                             if !updates.isEmpty {
                                 VStack(alignment: .leading, spacing: 10) {
-                                    Text(L10n.t("规范纠错与属性补全建议（\(updates.count)）", "Naming & Spec Improvements (\(updates.count))"))
-                                        .font(.system(size: 15, weight: .semibold))
+                                    HStack {
+                                        Text(L10n.t("规范纠错与属性补全建议（\(updates.count)）", "Naming & Spec Improvements (\(updates.count))"))
+                                            .font(.system(size: 15, weight: .semibold))
+                                        Spacer()
+                                        Button(L10n.t("全选", "Select All")) {
+                                            for idx in updates.indices { updates[idx].selected = true }
+                                            persistCurrentSession()
+                                        }
+                                        .buttonStyle(.link)
+                                        .font(.system(size: 12))
+                                        Button(L10n.t("全不选", "Deselect All")) {
+                                            for idx in updates.indices { updates[idx].selected = false }
+                                            persistCurrentSession()
+                                        }
+                                        .buttonStyle(.link)
+                                        .font(.system(size: 12))
+                                    }
 
                                     ForEach($updates) { $proposal in
                                         HStack(alignment: .top, spacing: 12) {
                                             Toggle("", isOn: $proposal.selected)
                                                 .labelsHidden()
                                                 .padding(.top, 2)
+                                                .onChange(of: proposal.selected) { _, _ in
+                                                    persistCurrentSession()
+                                                }
 
                                             VStack(alignment: .leading, spacing: 6) {
                                                 HStack(spacing: 8) {
@@ -288,6 +353,9 @@ struct AIHealthCheckSheet: View {
                                             Toggle("", isOn: $m.selected)
                                                 .labelsHidden()
                                                 .padding(.top, 2)
+                                                .onChange(of: m.selected) { _, _ in
+                                                    persistCurrentSession()
+                                                }
 
                                             VStack(alignment: .leading, spacing: 5) {
                                                 HStack(spacing: 6) {
@@ -326,8 +394,8 @@ struct AIHealthCheckSheet: View {
 
             HStack {
                 if hasCompleted && (!updates.isEmpty || !merges.isEmpty) {
-                    Text(L10n.t("已勾选 \(selectedCount) 项改动", "\(selectedCount) changes selected"))
-                        .font(.system(size: 13))
+                    Text(L10n.t("已勾选 \(selectedCount) 项改动（应用后保留未勾选与失败项）", "\(selectedCount) selected (remaining & failed items stay preserved)"))
+                        .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -338,24 +406,125 @@ struct AIHealthCheckSheet: View {
                 .keyboardShortcut(.cancelAction)
                 if !updates.isEmpty || !merges.isEmpty {
                     Button(L10n.t("应用选中修改", "Apply Selected")) {
-                        errorMessage = nil
-                        switch store.applyAuditProposals(updates: updates, merges: merges) {
-                        case .success:
-                            dismiss()
-                        case .failure(let error):
-                            errorMessage = error.localizedDescription
-                        }
+                        applySelectedWithoutClosing()
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(ShaveTheme.accent)
-                    .disabled(selectedCount == 0 || store.isReadOnlyProtected)
+                    .disabled(selectedCount == 0 || isAuditing || store.isReadOnlyProtected)
                 }
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 16)
         }
-        .frame(width: 740, height: 650)
+        .frame(width: 760, height: 670)
+        .onAppear {
+            restoreSessionIfNeeded()
+        }
         .onDisappear { auditTask?.cancel() }
+    }
+
+    // MARK: - 会话持久化与断点续做
+
+    private func restoreSessionIfNeeded() {
+        guard !hasLoadedSession else { return }
+        hasLoadedSession = true
+        guard let session = store.repository.loadAIHealthCheckSession() else { return }
+        if let savedScope = AuditScope(rawValue: session.scopeRawValue) {
+            scope = savedScope
+        }
+        modelUsed = session.modelUsed
+        plannedCount = session.plannedCount
+        verifiedCount = session.verifiedCount
+        skippedCount = session.skippedCount
+        unknownOrDuplicateIDCount = session.unknownOrDuplicateIDCount
+        retryRound = session.retryRound
+        updates = session.updates
+        merges = session.merges
+        undeterminedItems = session.undeterminedItems
+        failedItems = session.failedItems
+        batchFailures = session.batchFailures
+        liveUndeterminedCount = session.undeterminedItems.count
+        liveFailedCount = session.failedItems.count
+        hasCompleted = true
+        resumedFromDisk = true
+    }
+
+    private func persistCurrentSession() {
+        guard hasCompleted else { return }
+        let session = AIHealthCheckSession(
+            savedAt: SyncTimestamp.nowISO8601(),
+            scopeRawValue: scope.rawValue,
+            category: scope == .currentCategory ? initialCategory : nil,
+            modelUsed: modelUsed,
+            plannedCount: plannedCount,
+            verifiedCount: verifiedCount,
+            skippedCount: skippedCount,
+            unknownOrDuplicateIDCount: unknownOrDuplicateIDCount,
+            retryRound: retryRound,
+            updates: updates,
+            merges: merges,
+            undeterminedItems: undeterminedItems,
+            failedItems: failedItems,
+            batchFailures: batchFailures
+        )
+        store.repository.saveAIHealthCheckSession(session)
+    }
+
+    private func clearSession() {
+        auditTask?.cancel()
+        store.repository.clearAIHealthCheckSession()
+        hasCompleted = false
+        resumedFromDisk = false
+        errorMessage = nil
+        infoBannerMessage = nil
+        modelUsed = nil
+        updates = []
+        merges = []
+        undeterminedItems = []
+        failedItems = []
+        batchFailures = []
+        plannedCount = 0
+        verifiedCount = 0
+        skippedCount = 0
+        unknownOrDuplicateIDCount = 0
+        liveUndeterminedCount = 0
+        liveFailedCount = 0
+        currentBatch = 0
+        totalBatches = 0
+        retryRound = 0
+    }
+
+    private func applySelectedWithoutClosing() {
+        errorMessage = nil
+        let appliedUpdateIDs = Set(updates.filter(\.selected).map(\.id))
+        let appliedMergeIDs = Set(merges.filter(\.selected).map(\.id))
+        let totalSelected = appliedUpdateIDs.count + appliedMergeIDs.count
+        guard totalSelected > 0 else { return }
+
+        switch store.applyAuditProposals(updates: updates, merges: merges) {
+        case .success:
+            // 仅移除本次已应用的勾选条目，原样保留所有未勾选建议、无法判断项与失败批次
+            updates.removeAll { appliedUpdateIDs.contains($0.id) }
+            merges.removeAll { appliedMergeIDs.contains($0.id) }
+            resumedFromDisk = false
+            persistCurrentSession()
+
+            let remainingProposals = updates.count + merges.count
+            let remainingIncomplete = failedItems.count + undeterminedItems.count
+            if remainingProposals == 0 && remainingIncomplete == 0 {
+                infoBannerMessage = L10n.t(
+                    "已应用 \(totalSelected) 项修改，本次体检全部处理完毕。",
+                    "Applied \(totalSelected) change(s). All audit items are now resolved."
+                )
+            } else {
+                infoBannerMessage = L10n.t(
+                    "已应用 \(totalSelected) 项修改；仍保留 \(remainingProposals) 项未勾选建议与 \(remainingIncomplete) 项未完成/失败项，可继续操作或点击重试。",
+                    "Applied \(totalSelected) change(s). \(remainingProposals) unselected suggestion(s) and \(remainingIncomplete) incomplete/failed item(s) remain preserved."
+                )
+            }
+        case .failure(let error):
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func startAuditTask() {
@@ -372,7 +541,9 @@ struct AIHealthCheckSheet: View {
         let itemsToAudit = targetItems
         isAuditing = true
         errorMessage = nil
+        infoBannerMessage = nil
         hasCompleted = false
+        resumedFromDisk = false
         updates = []
         merges = []
         undeterminedItems = []
@@ -414,20 +585,24 @@ struct AIHealthCheckSheet: View {
             liveFailedCount = report.failedItems.count
             batchFailures = report.failures
             hasCompleted = true
+            persistCurrentSession()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     private func retryIncompleteItems() async {
-        guard !retryableItems.isEmpty, retryRound < Self.maxRetryRounds else { return }
-        retryRound += 1
+        let retryingFailedOnly = !failedItems.isEmpty
         let itemsToRetry = retryableItems
+        guard !itemsToRetry.isEmpty, retryRound < Self.maxRetryRounds else { return }
+        retryRound += 1
         let baseVerified = verifiedCount
         let baseSkipped = skippedCount
         let baseBadIDs = unknownOrDuplicateIDCount
+        let preservedUndetermined = retryingFailedOnly ? undeterminedItems : []
         isAuditing = true
         errorMessage = nil
+        infoBannerMessage = nil
         liveFailedCount = failedItems.count
         liveUndeterminedCount = undeterminedItems.count
         currentBatch = 0
@@ -443,16 +618,21 @@ struct AIHealthCheckSheet: View {
                 totalBatches = progress.totalBatches
                 verifiedCount = baseVerified + progress.verifiedCount
                 skippedCount = baseSkipped + progress.skippedCount
-                liveUndeterminedCount = progress.undeterminedCount
+                liveUndeterminedCount = preservedUndetermined.count + progress.undeterminedCount
                 liveFailedCount = progress.failedCount
             }
             modelUsed = report.modelUsed
             verifiedCount = baseVerified + report.verifiedCount
             skippedCount = baseSkipped + report.skippedCount
             unknownOrDuplicateIDCount = baseBadIDs + report.unknownOrDuplicateIDCount
-            undeterminedItems = report.undeterminedItems
+
+            var mergedUndetermined = preservedUndetermined
+            for u in report.undeterminedItems where !mergedUndetermined.contains(where: { $0.id == u.id }) {
+                mergedUndetermined.append(u)
+            }
+            undeterminedItems = mergedUndetermined
             failedItems = report.failedItems
-            liveUndeterminedCount = report.undeterminedItems.count
+            liveUndeterminedCount = mergedUndetermined.count
             liveFailedCount = report.failedItems.count
             batchFailures = report.failures
 
@@ -469,6 +649,8 @@ struct AIHealthCheckSheet: View {
                 }
             }
             hasCompleted = true
+            resumedFromDisk = false
+            persistCurrentSession()
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -59,8 +59,81 @@ enum GearCatalogService {
             }
             return (fullKey, existing)
         }
+
+        // 若输入为某件已有器材的规范显示名（如点选「Feather New Hi-Stainless」而旧规则键为「刀片|featherde」），
+        // 反向映射至唯一匹配的既有 override，避免器材库与统计引擎分裂出重复条目
+        let prefix = "\(category.rawValue)|"
+        var matchedIdentity: String? = nil
+        var matchedOverride: GearOverride? = nil
+        var isAmbiguous = false
+        for (k, ov) in db.overrides where k.hasPrefix(prefix) {
+            let nameNorm = GearKnowledgeBase.normalizeKey(ov.name)
+            let canonicalNorm = GearKnowledgeBase.normalizeKey(ov.canonicalDisplayName)
+            guard nameNorm == norm || canonicalNorm == norm else { continue }
+            var hydrated = ov
+            hydrated.status = GearStatus.normalized(hydrated.status, for: category)
+            if category == .blade, hydrated.bladeType == nil {
+                hydrated.bladeType = GearKnowledgeBase.inferBladeType(from: hydrated.name)
+            }
+            let sig = variantSignature(category: category, override: hydrated)
+            let identity = "\(category.rawValue)|\(hydrated.brand.lowercased())|\(hydrated.name.lowercased())|\(sig)"
+            if let prevId = matchedIdentity {
+                if prevId != identity {
+                    isAmbiguous = true
+                    break
+                }
+            } else {
+                matchedIdentity = identity
+                matchedOverride = hydrated
+            }
+        }
+        if !isAmbiguous, let resolvedExisting = matchedOverride {
+            return (fullKey, resolvedExisting)
+        }
+
         let inferred = GearKnowledgeBase.inferDefaultOverride(rawName: effectiveRaw, category: category)
         return (fullKey, inferred)
+    }
+
+    /// 联想菜单点选后填入输入框的规范显示名（所见即所得；同品牌同型号存在多规格变体时自动附加区分规格）
+    static func autocompleteInsertText(for item: GearItem, in allItems: [GearItem]) -> String {
+        let base = item.canonicalDisplayName
+        let baseNorm = GearKnowledgeBase.normalizeKey(base)
+        let hasCollision = allItems.contains { other in
+            other.id != item.id && GearKnowledgeBase.normalizeKey(other.canonicalDisplayName) == baseNorm
+        }
+        guard hasCollision else { return base }
+
+        var extras: [String] = []
+        switch item.category {
+        case .razor:
+            if let mat = item.material?.trimmingCharacters(in: .whitespacesAndNewlines), !mat.isEmpty,
+               !base.lowercased().contains(mat.lowercased()) {
+                extras.append(mat)
+            }
+            if let pt = item.plateType, !base.uppercased().contains(pt.rawValue) {
+                extras.append(pt.rawValue)
+            }
+            if let gap = GearSpecFormatter.shortSpecTag(item.gapOrSpec), !base.lowercased().contains(gap.lowercased()) {
+                extras.append(gap)
+            }
+        case .brush:
+            if let hb = item.handleBrand?.trimmingCharacters(in: .whitespacesAndNewlines), !hb.isEmpty,
+               !base.lowercased().contains(hb.lowercased()) {
+                extras.append(hb)
+            }
+            if let ks = item.knotSize?.trimmingCharacters(in: .whitespacesAndNewlines), !ks.isEmpty,
+               !base.lowercased().contains(ks.lowercased()) {
+                extras.append(ks)
+            }
+        case .soap, .afterShave:
+            if item.isSample {
+                extras.append("小样")
+            }
+        default:
+            break
+        }
+        return extras.isEmpty ? base : "\(base) (\(extras.joined(separator: " ")))"
     }
 
     static func variantSignature(category: GearCategory, override ov: GearOverride) -> String {
@@ -368,6 +441,8 @@ enum GearCatalogService {
                 item.name.lowercased().contains(q) ||
                 item.brand.lowercased().contains(q) ||
                 item.model.lowercased().contains(q) ||
+                item.canonicalDisplayName.lowercased().contains(q) ||
+                item.rawKeys.contains(where: { $0.lowercased().contains(q) }) ||
                 (item.handleBrand?.lowercased().contains(q) ?? false) ||
                 (item.gapOrSpec?.lowercased().contains(q) ?? false) ||
                 (item.material?.lowercased().contains(q) ?? false)
@@ -434,14 +509,24 @@ enum GearCatalogService {
     }
 
     static func suggestedNextUseCount(forBlade baseBladeName: String, in db: JournalDatabase) -> Int {
-        let targetNorm = GearKnowledgeBase.normalizeKey(GearKnowledgeBase.parseBladeUsage(baseBladeName).baseName)
+        let baseRaw = GearKnowledgeBase.parseBladeUsage(baseBladeName).baseName
+        let targetNorm = GearKnowledgeBase.normalizeKey(baseRaw)
         guard !targetNorm.isEmpty else { return 1 }
+        let (_, targetOv) = resolveGear(category: .blade, rawValue: baseRaw, in: db)
+        let targetOvNameNorm = GearKnowledgeBase.normalizeKey(targetOv.name)
+        let targetCanonicalNorm = GearKnowledgeBase.normalizeKey(targetOv.canonicalDisplayName)
         for entry in db.entries {
             for raw in entry.fieldValues(matching: ["刀片"]) {
                 let parsed = GearKnowledgeBase.parseBladeUsage(raw)
                 let (_, ov) = resolveGear(category: .blade, rawValue: raw, in: db)
-                if GearKnowledgeBase.normalizeKey(parsed.baseName) == targetNorm ||
-                   GearKnowledgeBase.normalizeKey(ov.name) == targetNorm {
+                let entryBaseNorm = GearKnowledgeBase.normalizeKey(parsed.baseName)
+                let entryOvNameNorm = GearKnowledgeBase.normalizeKey(ov.name)
+                let entryCanonicalNorm = GearKnowledgeBase.normalizeKey(ov.canonicalDisplayName)
+                if entryBaseNorm == targetNorm ||
+                   entryOvNameNorm == targetNorm ||
+                   entryOvNameNorm == targetOvNameNorm ||
+                   entryCanonicalNorm == targetNorm ||
+                   entryCanonicalNorm == targetCanonicalNorm {
                     return (parsed.useCount ?? 1) + 1
                 }
             }
@@ -456,6 +541,8 @@ enum GearCatalogService {
         keys.insert(item.canonicalKey)
         let normKey = "\(item.category.rawValue)|\(GearKnowledgeBase.normalizeKey(item.name))"
         keys.insert(normKey)
+        let canonicalDisplayKey = "\(item.category.rawValue)|\(GearKnowledgeBase.normalizeKey(item.canonicalDisplayName))"
+        keys.insert(canonicalDisplayKey)
         return keys
     }
 

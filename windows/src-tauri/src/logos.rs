@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 use crate::storage::atomic_write_bytes;
@@ -13,6 +13,8 @@ use crate::storage::atomic_write_bytes;
 const CUSTOM_LOGOS_DIR: &str = "CustomLogos";
 const LOGO_CACHE_DIR: &str = "LogoCache";
 const LEGACY_LOGOS_DIR: &str = "BrandLogos";
+const FAILED_COOLDOWN_FILE: &str = "failed_cooldown.json";
+const FAILED_COOLDOWN_SECS: f64 = 24.0 * 3600.0;
 const MAX_LOGO_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_FETCHED_LOGO_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CONCURRENT_FETCHES: usize = 4;
@@ -68,28 +70,147 @@ const BLACKLISTED_DOMAINS: &[&str] = &[
     "wordpress.com",
 ];
 
-/// 内置常见湿剃品牌官方独立域名映射表（对齐 Mac 版 BrandLogoService.brandDomains 并补全常用别名）
+/// 品牌中英文/简称/子线别名归一化表（与 Mac 版 BrandLogoCache.brandAliases 对齐）
+const BRAND_ALIASES: &[(&str, &str)] = &[
+    ("华研", "Terry's Soap"),
+    ("华研手工皂", "Terry's Soap"),
+    ("hwayeon", "Terry's Soap"),
+    ("hwayeon soap", "Terry's Soap"),
+    ("hwayeon soap co", "Terry's Soap"),
+    ("terrys soap", "Terry's Soap"),
+    ("terry soap", "Terry's Soap"),
+    ("terry's soap", "Terry's Soap"),
+    ("帝诗", "DSCosmetic"),
+    ("dscosmetic", "DSCosmetic"),
+    ("ds cosmetic", "DSCosmetic"),
+    ("wolfman", "Wolfman"),
+    ("wolfman razors", "Wolfman"),
+    ("狼人", "Wolfman"),
+    ("karve", "Karve"),
+    ("karve shaving", "Karve"),
+    ("karve shaving co", "Karve"),
+    ("karve shaving co.", "Karve"),
+    ("stirling", "Stirling Soap Co."),
+    ("stirling soap", "Stirling Soap Co."),
+    ("stirling soap co", "Stirling Soap Co."),
+    ("stirling soap co.", "Stirling Soap Co."),
+    ("斯特林", "Stirling Soap Co."),
+    ("dg", "Declaration Grooming"),
+    ("declaration", "Declaration Grooming"),
+    ("declaration grooming", "Declaration Grooming"),
+    ("hom", "House of Mammoth"),
+    ("mammoth", "House of Mammoth"),
+    ("house of mammoth", "House of Mammoth"),
+    ("猛犸象", "House of Mammoth"),
+    ("paa", "Phoenix Artisan Accoutrements"),
+    ("phoenix", "Phoenix Artisan Accoutrements"),
+    ("phoenix shaving", "Phoenix Artisan Accoutrements"),
+    ("phoenix artisan", "Phoenix Artisan Accoutrements"),
+    ("phoenix artisan accoutrements", "Phoenix Artisan Accoutrements"),
+    ("moon", "Moon Soaps"),
+    ("moon soaps", "Moon Soaps"),
+    ("ae", "Ariana & Evans"),
+    ("a&e", "Ariana & Evans"),
+    ("ariana & evans", "Ariana & Evans"),
+    ("ariana and evans", "Ariana & Evans"),
+    ("the club", "Ariana & Evans"),
+    ("c&h", "Chisel & Hound"),
+    ("chisel & hound", "Chisel & Hound"),
+    ("chisel and hound", "Chisel & Hound"),
+    ("paladin", "Paladin"),
+    ("paladin shaving", "Paladin"),
+    ("tns", "Turn-N-Shave"),
+    ("turn-n-shave", "Turn-N-Shave"),
+    ("turn n shave", "Turn-N-Shave"),
+    ("turnnshave", "Turn-N-Shave"),
+    ("brad sears", "Brad Sears"),
+    ("brad sears shave works", "Brad Sears"),
+    ("yaqi", "Yaqi"),
+    ("yaqi shaving", "Yaqi"),
+    ("雅琪", "Yaqi"),
+    ("aylsworth", "Aylsworth"),
+    ("aylsworth razors", "Aylsworth"),
+    ("alysworth", "Aylsworth"),
+    ("rocnel", "Rocnel"),
+    ("lambda", "Lambda"),
+    ("lambda razors", "Lambda"),
+    ("westman", "WestMan Shaving"),
+    ("westman shaving", "WestMan Shaving"),
+    ("semogue", "Semogue"),
+    ("soc", "Semogue"),
+    ("semogue owners club", "Semogue"),
+    ("cayuen", "Cayuen"),
+    ("cayuen workshop", "Cayuen"),
+    ("att", "Above The Tie"),
+    ("ad", "Atelier Durdan"),
+    ("alpha shaving", "Alpha"),
+    ("b&m", "Barrister and Mann"),
+    ("barrister & mann", "Barrister and Mann"),
+    ("blackland razors", "Blackland"),
+    ("黑鸟", "Blackland"),
+    ("colonial razors", "Colonial"),
+    ("ethos", "Ethos Grooming"),
+    ("fine", "Fine Accoutrements"),
+    ("fs", "Frank Shaving"),
+    ("羽毛", "Feather"),
+    ("吉列", "Gillette"),
+    ("henson shaving", "Henson"),
+    ("homelike", "HLS"),
+    ("homelike shaving", "HLS"),
+    ("贝印", "Kai"),
+    ("lpl", "Le Père Lucien"),
+    ("le pere lucien", "Le Père Lucien"),
+    ("macduff", "MacDuffs Soap Company"),
+    ("macduffs", "MacDuffs Soap Company"),
+    ("maggard razors", "Maggard"),
+    ("mdc", "Martin de Candre"),
+    ("muhle", "Mühle"),
+    ("穆乐", "Mühle"),
+    ("默克尔", "Merkur"),
+    ("mwf", "Mitchell's Wool Fat"),
+    ("水獭", "Noble Otter"),
+    ("欧慕", "Oumo"),
+    ("博蒂", "Boti"),
+    ("博拉索", "Proraso"),
+    ("rr", "RazoRock"),
+    ("italian barber", "RazoRock"),
+    ("rex", "Rex Supply Co."),
+    ("rex supply", "Rex Supply Co."),
+    ("sv", "Saponificio Varesino"),
+    ("sv1945", "Saponificio Varesino"),
+    ("舒适", "Schick"),
+    ("辛普森", "Simpson"),
+    ("tatara razors", "Tatara"),
+    ("tobs", "Taylor of Old Bond Street"),
+    ("tgs", "The Goodfellas' Smile"),
+    ("trc", "The Razor Company"),
+    ("津尔氏", "Thayers"),
+    ("timeless razor", "Timeless"),
+    ("wilkinson", "Wilkinson Sword"),
+    ("zingari", "Zingari Man"),
+    ("ej", "Edwin Jagger"),
+    ("loccitane", "L'Occitane"),
+    ("欧舒丹", "L'Occitane"),
+    ("dr harris", "D.R. Harris"),
+    ("carbon", "Carbon Shaving"),
+];
+
+/// 内置经核实的湿剃品牌官方独立域名白名单（严禁在白名单外瞎猜 <品牌>.com）
 const BRAND_DOMAINS: &[(&str, &str)] = &[
     ("Above The Tie", "abovethetie.com"),
-    ("ATT", "abovethetie.com"),
     ("Acqua di Parma", "acquadiparma.com"),
     ("Alpha", "alphashaving.com"),
-    ("Alpha Shaving", "alphashaving.com"),
     ("Amonatura", "amonatura.com"),
     ("AP Shave Co", "apshaveco.com"),
     ("Ariana & Evans", "aegrooming.com"),
-    ("A&E", "aegrooming.com"),
     ("Arko", "arkomen.com"),
     ("Arno", "arnobrush.com"),
     ("Ascender", "ascenderrazors.com"),
     ("Atelier Durdan", "atelierdurdan.com"),
     ("Aylsworth", "aylsworthrazors.com"),
     ("Barrister and Mann", "barristerandmann.com"),
-    ("Barrister & Mann", "barristerandmann.com"),
-    ("B&M", "barristerandmann.com"),
     ("BIC", "bic.com"),
     ("Blackland", "blacklandrazors.com"),
-    ("Blackland Razors", "blacklandrazors.com"),
     ("Blutt", "bluttrasur.ch"),
     ("Boti", "botibrush.com"),
     ("Brad Sears", "bradsearsshaveworks.com"),
@@ -102,24 +223,19 @@ const BRAND_DOMAINS: &[(&str, &str)] = &[
     ("CeraVe", "cerave.com"),
     ("Charcoal Goods", "charcoalgoods.com"),
     ("Chisel & Hound", "chiselandhound.com"),
-    ("C&H", "chiselandhound.com"),
     ("Chiseled Face", "chiseledface.com"),
     ("Clubman Pinaud", "clubmanonline.com"),
     ("Colonial", "colonialrazors.com"),
-    ("Colonial Razors", "colonialrazors.com"),
     ("D.R. Harris", "drharris.co.uk"),
     ("Declaration Grooming", "declarationgrooming.com"),
-    ("DG", "declarationgrooming.com"),
     ("Derby", "derbyrazorblades.com"),
     ("Dorco", "dorcousa.com"),
     ("DSCosmetic", "dscosmetic.com"),
     ("Edwin Jagger", "edwinjagger.com"),
     ("Elysian Soap Shop", "elysiansoapshop.com"),
-    ("Ethos", "ethosgroomingessentials.com"),
     ("Ethos Grooming", "ethosgroomingessentials.com"),
     ("Fatip", "fatip.it"),
     ("Feather", "feather.co.jp"),
-    ("Fine", "fineaccoutrements.com"),
     ("Fine Accoutrements", "fineaccoutrements.com"),
     ("Frank Shaving", "frankshaving.com"),
     ("Geo. F. Trumper", "trumpers.com"),
@@ -128,13 +244,10 @@ const BRAND_DOMAINS: &[(&str, &str)] = &[
     ("HAGS", "haveagreatshave.com"),
     ("Haslinger", "haslingerseifen.at"),
     ("Henson", "hensonshaving.com"),
-    ("Henson Shaving", "hensonshaving.com"),
     ("HLS", "homelikeshaving.ru"),
     ("House of Mammoth", "houseofmammoth.com"),
-    ("Italian Barber", "italianbarber.com"),
     ("Kai", "kai-group.com"),
     ("Karve", "karveshaving.com"),
-    ("Karve Shaving", "karveshaving.com"),
     ("L'Occitane", "loccitane.com"),
     ("Lambda", "lambdarazors.com"),
     ("Le Père Lucien", "leperelucien.com"),
@@ -142,15 +255,12 @@ const BRAND_DOMAINS: &[(&str, &str)] = &[
     ("Longshaving", "longshaving.com"),
     ("MacDuffs Soap Company", "macduffssoapcompany.com"),
     ("Maggard", "maggardrazors.com"),
-    ("Maggard Razors", "maggardrazors.com"),
     ("Martin de Candre", "martin-de-candre.com"),
-    ("MDC", "martin-de-candre.com"),
     ("Maxwell June", "maxwelljune.com"),
     ("Merkur", "merkur-razors.com"),
     ("Mitchell's Wool Fat", "mitchellswoolfatsoap.co.uk"),
     ("Moon Soaps", "moonsoaps.com"),
     ("Mühle", "muehle-shaving.com"),
-    ("Muhle", "muehle-shaving.com"),
     ("Murphy and McNeil", "murphyandmcneil.com"),
     ("Nivea", "nivea.com"),
     ("Noble Otter", "nobleotter.com"),
@@ -164,34 +274,28 @@ const BRAND_DOMAINS: &[(&str, &str)] = &[
     ("Parker", "parkershaving.com"),
     ("Personna", "personna.com"),
     ("Phoenix Artisan Accoutrements", "phoenixartisanaccoutrements.com"),
-    ("PAA", "phoenixartisanaccoutrements.com"),
     ("Proraso", "proraso.com"),
     ("RazoRock", "italianbarber.com"),
-    ("Rex", "rexsupplyco.com"),
     ("Rex Supply Co.", "rexsupplyco.com"),
     ("Rockwell", "getrockwell.com"),
     ("Rocnel", "rocnel.com"),
     ("Saponificio Varesino", "saponificiovaresino.com"),
-    ("SV", "saponificiovaresino.com"),
     ("Schick", "schick.com"),
     ("Semogue", "portuguesefactory.com"),
     ("Shavemac", "shavemac.com"),
     ("Simpson", "simpsonshavingbrushes.com"),
     ("Southern Witchcrafts", "southernwitchcrafts.com"),
     ("Speick", "speick.de"),
-    ("Stirling", "stirlingsoap.com"),
     ("Stirling Soap Co.", "stirlingsoap.com"),
     ("Summer Break Soaps", "summerbreaksoaps.com"),
     ("Tabac", "tabac-original.com"),
     ("Tatara", "tatararazors.com"),
-    ("Tatara Razors", "tatararazors.com"),
     ("Taylor of Old Bond Street", "tayloroldbondst.co.uk"),
-    ("TOBS", "tayloroldbondst.co.uk"),
+    ("Terry's Soap", "hwayeon.co.kr"),
     ("Thayers", "thayers.com"),
     ("The Goodfellas' Smile", "rasoigoodfellas.com"),
     ("The Razor Company", "therazorcompany.com"),
     ("Timeless", "timelessrazor.com"),
-    ("Timeless Razor", "timelessrazor.com"),
     ("Treet", "treetonline.com"),
     ("Truefitt & Hill", "truefittandhill.co.uk"),
     ("Turn-N-Shave", "turnnshave.com"),
@@ -199,15 +303,12 @@ const BRAND_DOMAINS: &[(&str, &str)] = &[
     ("WestMan Shaving", "westmanshaving.com"),
     ("Wholly Kaw", "whollykaw.com"),
     ("Wickham", "w-soap.co.uk"),
-    ("Wilkinson", "wilkinsonsword.com"),
     ("Wilkinson Sword", "wilkinsonsword.com"),
     ("Wolfman", "wolfmanrazors.com"),
-    ("Wolfman Razors", "wolfmanrazors.com"),
     ("Yaqi", "yaqishaving.com"),
     ("Yates", "yatesprecision.com"),
     ("Zenith", "pennellificiopandolfo.com"),
     ("Zingari Man", "zingariman.com"),
-    ("Zingari", "zingariman.com"),
 ];
 
 /// 与 Mac 版 BrandLogoCache.normalizedBrandKey(_:) 100% 一致的品牌文件名归一化
@@ -227,34 +328,6 @@ fn compact_alnum_token(input: &str) -> String {
         .chars()
         .filter(|c| c.is_alphanumeric())
         .collect()
-}
-
-fn ascii_domain_slug(brand: &str) -> Option<String> {
-    let mut slug = String::new();
-    let mut has_ascii_alpha = false;
-    for ch in brand.trim().chars() {
-        let mapped = match ch {
-            'ü' | 'Ü' => Some('u'),
-            'ö' | 'Ö' => Some('o'),
-            'ä' | 'Ä' => Some('a'),
-            'è' | 'é' | 'ê' | 'ë' | 'È' | 'É' => Some('e'),
-            'à' | 'á' | 'â' | 'À' | 'Á' => Some('a'),
-            'ç' | 'Ç' => Some('c'),
-            c if c.is_ascii_alphanumeric() => Some(c.to_ascii_lowercase()),
-            _ => None,
-        };
-        if let Some(c) = mapped {
-            if c.is_ascii_alphabetic() {
-                has_ascii_alpha = true;
-            }
-            slug.push(c);
-        }
-    }
-    if has_ascii_alpha && slug.len() >= 3 && slug.len() <= 42 {
-        Some(slug)
-    } else {
-        None
-    }
 }
 
 fn should_skip_brand(brand: &str) -> bool {
@@ -286,22 +359,63 @@ fn is_blacklisted_host(host: &str) -> bool {
     false
 }
 
-fn lookup_known_domain(brand: &str) -> Option<&'static str> {
-    let trimmed = brand.trim();
+fn lookup_direct_domain(candidate: &str) -> Option<(&'static str, &'static str)> {
+    let trimmed = candidate.trim();
     if trimmed.is_empty() {
         return None;
     }
     let lower = trimmed.to_lowercase();
     for (name, domain) in BRAND_DOMAINS {
         if name.eq_ignore_ascii_case(trimmed) || name.to_lowercase() == lower {
-            return Some(*domain);
+            return Some((*name, *domain));
+        }
+    }
+    for (alias, canonical) in BRAND_ALIASES {
+        if alias.eq_ignore_ascii_case(trimmed) || alias.to_lowercase() == lower {
+            if let Some((name, domain)) = BRAND_DOMAINS
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(canonical))
+            {
+                return Some((*name, *domain));
+            }
         }
     }
     let compact = compact_alnum_token(trimmed);
     if !compact.is_empty() {
         for (name, domain) in BRAND_DOMAINS {
             if compact_alnum_token(name) == compact {
-                return Some(*domain);
+                return Some((*name, *domain));
+            }
+        }
+        for (alias, canonical) in BRAND_ALIASES {
+            if compact_alnum_token(alias) == compact {
+                if let Some((name, domain)) = BRAND_DOMAINS
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(canonical))
+                {
+                    return Some((*name, *domain));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 别名归一化 + 混搭名 `A × B` 主品牌提取 → 仅命中经核实官网白名单
+fn resolve_whitelisted_brand(brand: &str) -> Option<(&'static str, &'static str)> {
+    let trimmed = brand.trim();
+    if should_skip_brand(trimmed) {
+        return None;
+    }
+    if let Some(hit) = lookup_direct_domain(trimmed) {
+        return Some(hit);
+    }
+    for sep in ["×", " x ", " X ", " / ", "/"] {
+        if trimmed.contains(sep) {
+            for part in trimmed.split(sep).map(str::trim).filter(|p| !p.is_empty()) {
+                if let Some(hit) = lookup_direct_domain(part) {
+                    return Some(hit);
+                }
             }
         }
     }
@@ -675,60 +789,109 @@ fn extract_attr_value(tag: &str, attr_name: &str) -> Option<String> {
 }
 
 fn extract_html_icon_urls(html: &str, base_url: &Url) -> Vec<String> {
-    let Ok(link_re) = Regex::new(r"(?is)<link\b[^>]*>") else {
-        return Vec::new();
-    };
-
     let mut apple_icons: Vec<String> = Vec::new();
     let mut std_icons: Vec<String> = Vec::new();
+    let mut og_and_header: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for m in link_re.find_iter(html) {
-        let tag = m.as_str();
-        let Some(rel) = extract_attr_value(tag, "rel") else {
-            continue;
-        };
-        let rel_lower = rel.to_lowercase();
-        let is_apple = rel_lower.contains("apple-touch-icon");
-        let is_icon = !is_apple
-            && (rel_lower == "icon"
-                || rel_lower == "shortcut icon"
-                || rel_lower.split_whitespace().any(|tok| tok == "icon"));
-        if !is_apple && !is_icon {
-            continue;
+    let push_candidate = |raw: &str, bucket: &mut Vec<String>, seen: &mut HashSet<String>| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with("data:") || trimmed.starts_with("javascript:") {
+            return;
         }
-        let Some(href) = extract_attr_value(tag, "href") else {
-            continue;
-        };
-        if href.starts_with("data:") || href.starts_with("javascript:") {
-            continue;
-        }
-        let Ok(resolved) = base_url.join(&href) else {
-            continue;
+        let Ok(resolved) = base_url.join(trimmed) else {
+            return;
         };
         if resolved.scheme() != "https" && resolved.scheme() != "http" {
-            continue;
+            return;
         }
-        if let Some(host) = resolved.host_str() {
-            if is_blacklisted_host(host) {
-                continue;
-            }
-        } else {
-            continue;
+        let Some(host) = resolved.host_str() else {
+            return;
+        };
+        if is_blacklisted_host(host) {
+            return;
         }
         let abs = resolved.to_string();
-        if !seen.insert(abs.clone()) {
-            continue;
+        if seen.insert(abs.clone()) {
+            bucket.push(abs);
         }
-        if is_apple {
-            apple_icons.push(abs);
-        } else {
-            std_icons.push(abs);
+    };
+
+    // 1) <link rel="apple-touch-icon"> 与 <link rel="icon">
+    if let Ok(link_re) = Regex::new(r"(?is)<link\b[^>]*>") {
+        for m in link_re.find_iter(html) {
+            let tag = m.as_str();
+            let Some(rel) = extract_attr_value(tag, "rel") else {
+                continue;
+            };
+            let rel_lower = rel.to_lowercase();
+            let is_apple = rel_lower.contains("apple-touch-icon");
+            let is_icon = !is_apple
+                && (rel_lower == "icon"
+                    || rel_lower == "shortcut icon"
+                    || rel_lower.split_whitespace().any(|tok| tok == "icon"));
+            if !is_apple && !is_icon {
+                continue;
+            }
+            let Some(href) = extract_attr_value(tag, "href") else {
+                continue;
+            };
+            if is_apple {
+                push_candidate(&href, &mut apple_icons, &mut seen);
+            } else {
+                push_candidate(&href, &mut std_icons, &mut seen);
+            }
+        }
+    }
+
+    // 2) <meta property="og:image">
+    if let Ok(meta_re) = Regex::new(r"(?is)<meta\b[^>]*>") {
+        for m in meta_re.find_iter(html) {
+            let tag = m.as_str();
+            let prop = extract_attr_value(tag, "property")
+                .or_else(|| extract_attr_value(tag, "name"))
+                .unwrap_or_default()
+                .to_lowercase();
+            if prop == "og:image" {
+                if let Some(content) = extract_attr_value(tag, "content") {
+                    push_candidate(&content, &mut og_and_header, &mut seen);
+                }
+            }
+        }
+    }
+
+    // 3) 页面头部 Logo <img>（优先 <header> 区域或带 logo/brand 属性的 <img>）
+    let mut header_regions: Vec<&str> = Vec::new();
+    if let Ok(header_re) = Regex::new(r"(?is)<header\b[^>]*>.*?</header>") {
+        for m in header_re.find_iter(html).take(2) {
+            header_regions.push(m.as_str());
+        }
+    }
+    let prefix_len = html.len().min(65_536);
+    let mut safe_prefix = prefix_len;
+    while safe_prefix > 0 && !html.is_char_boundary(safe_prefix) {
+        safe_prefix -= 1;
+    }
+    header_regions.push(&html[..safe_prefix]);
+
+    if let Ok(img_re) = Regex::new(r"(?is)<img\b[^>]*>") {
+        for region in header_regions {
+            for m in img_re.find_iter(region).take(20) {
+                let tag = m.as_str();
+                let lower = tag.to_lowercase();
+                if !lower.contains("logo") && !lower.contains("brand") {
+                    continue;
+                }
+                if let Some(src) = extract_attr_value(tag, "src") {
+                    push_candidate(&src, &mut og_and_header, &mut seen);
+                }
+            }
         }
     }
 
     apple_icons.extend(std_icons);
-    apple_icons.truncate(6);
+    apple_icons.extend(og_and_header);
+    apple_icons.truncate(10);
     apple_icons
 }
 
@@ -774,10 +937,17 @@ async fn download_valid_image(
     Some((slice.to_vec(), mime))
 }
 
+enum HomepageFetchOutcome {
+    Html(String, Url),
+    CloudflareBlocked,
+    Unavailable,
+}
+
 async fn fetch_site_homepage_html(
     client: &reqwest::Client,
     domain: &str,
-) -> Option<(String, Url)> {
+) -> HomepageFetchOutcome {
+    let mut cf_blocked = false;
     for home_str in [format!("https://{}", domain), format!("https://www.{}", domain)] {
         let Ok(resp) = client
             .get(&home_str)
@@ -787,10 +957,28 @@ async fn fetch_site_homepage_html(
         else {
             continue;
         };
-        if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let has_cf_header = resp.headers().get("cf-mitigated").is_some();
+        let final_url_str = resp.url().as_str().to_string();
+        let body_bytes = resp.bytes().await.unwrap_or_default();
+        let cap = body_bytes.len().min(256 * 1024);
+        let html = String::from_utf8_lossy(&body_bytes[..cap]).to_string();
+        let lower_html = html.to_lowercase();
+
+        if has_cf_header
+            || ((status == 403 || status == 503)
+                && (lower_html.contains("cloudflare")
+                    || lower_html.contains("just a moment")
+                    || lower_html.contains("_cf_chl_opt")
+                    || lower_html.contains("cf-browser-verification")))
+        {
+            cf_blocked = true;
             continue;
         }
-        let final_url_str = resp.url().as_str().to_string();
+
+        if !(200..=299).contains(&status) {
+            continue;
+        }
         let Ok(final_url) = Url::parse(&final_url_str) else {
             continue;
         };
@@ -800,60 +988,65 @@ async fn fetch_site_homepage_html(
         if is_blacklisted_host(final_host) {
             continue;
         }
-        let Ok(body_bytes) = resp.bytes().await else {
-            continue;
-        };
-        // 只扫描前 256 KB HTML 头部足以提取 <link> 图标标签
-        let cap = body_bytes.len().min(256 * 1024);
-        let html = String::from_utf8_lossy(&body_bytes[..cap]).to_string();
-        return Some((html, final_url));
+        return HomepageFetchOutcome::Html(html, final_url);
     }
-    None
+
+    if cf_blocked {
+        HomepageFetchOutcome::CloudflareBlocked
+    } else {
+        HomepageFetchOutcome::Unavailable
+    }
 }
 
-async fn fetch_domain_logo(
+async fn fetch_whitelisted_domain_logo(
     client: &reqwest::Client,
     domain: &str,
-    allow_s2_without_live_site: bool,
 ) -> Option<(Vec<u8>, &'static str)> {
     if is_blacklisted_host(domain) {
         return None;
     }
 
-    let mut site_was_reachable = false;
+    let mut blocked_by_cloudflare = false;
 
-    // 1) 优先抓取页面 <link rel="apple-touch-icon"> / <link rel="icon">
-    if let Some((html, final_url)) = fetch_site_homepage_html(client, domain).await {
-        site_was_reachable = true;
-        let candidates = extract_html_icon_urls(&html, &final_url);
-        for candidate in candidates {
-            if let Some(img) = download_valid_image(client, &candidate, true, 24).await {
+    // 1) 白名单官网优先提取 apple-touch-icon / 高清 icon / og:image / 头部 Logo
+    match fetch_site_homepage_html(client, domain).await {
+        HomepageFetchOutcome::Html(html, final_url) => {
+            let candidates = extract_html_icon_urls(&html, &final_url);
+            for candidate in candidates {
+                if let Some(img) = download_valid_image(client, &candidate, true, 24).await {
+                    return Some(img);
+                }
+            }
+        }
+        HomepageFetchOutcome::CloudflareBlocked => {
+            blocked_by_cloudflare = true;
+        }
+        HomepageFetchOutcome::Unavailable => {}
+    }
+
+    // 2) 未被 Cloudflare 拦截时，直接尝试 /apple-touch-icon.png 与 /favicon.ico
+    if !blocked_by_cloudflare {
+        let direct_candidates = [
+            format!("https://{}/apple-touch-icon.png", domain),
+            format!("https://www.{}/apple-touch-icon.png", domain),
+            format!("https://{}/favicon.ico", domain),
+            format!("https://www.{}/favicon.ico", domain),
+        ];
+        for url_str in direct_candidates {
+            if let Some(img) = download_valid_image(client, &url_str, true, 24).await {
                 return Some(img);
             }
         }
     }
 
-    // 2) 直接尝试 /apple-touch-icon.png 与 /favicon.ico
-    let direct_candidates = [
-        format!("https://{}/apple-touch-icon.png", domain),
-        format!("https://www.{}/apple-touch-icon.png", domain),
-        format!("https://{}/favicon.ico", domain),
-        format!("https://www.{}/favicon.ico", domain),
-    ];
-    for url_str in direct_candidates {
-        if let Some(img) = download_valid_image(client, &url_str, true, 24).await {
-            return Some(img);
-        }
-    }
-
-    // 3) Google S2 128px 兜底（严格校验：仅用于非黑名单域名，且未知猜测域名必须先验证站点可达）
-    if allow_s2_without_live_site || site_was_reachable {
-        let s2_url = format!(
-            "https://www.google.com/s2/favicons?domain={}&sz=128",
-            domain
-        );
-        if let Some(img) = download_valid_image(client, &s2_url, false, 24).await {
-            return Some(img);
+    // 3) 被 Cloudflare 拦截或直连未命中：回退至 Google Favicon 代理（sz=128），严格过滤 16x16 默认灰地球占位图（要求 >= 32px）
+    let s2_url = format!(
+        "https://www.google.com/s2/favicons?domain={}&sz=128",
+        domain
+    );
+    if let Some((bytes, mime)) = download_valid_image(client, &s2_url, false, 32).await {
+        if bytes.len() >= 400 {
+            return Some((bytes, mime));
         }
     }
 
@@ -864,24 +1057,42 @@ async fn resolve_brand_logo(
     client: &reqwest::Client,
     brand: &str,
 ) -> Option<(Vec<u8>, &'static str)> {
-    if should_skip_brand(brand) {
-        return None;
-    }
+    // 禁用瞎猜 <品牌名>.com：仅抓取白名单内经核实的品牌官网，小众/国内手工/仿刀默认展示干净首字徽章
+    let (_, known_domain) = resolve_whitelisted_brand(brand)?;
+    fetch_whitelisted_domain_logo(client, known_domain).await
+}
 
-    // 1) 优先命中内置常见湿剃品牌官方域名表
-    if let Some(known_domain) = lookup_known_domain(brand) {
-        return fetch_domain_logo(client, known_domain, true).await;
-    }
+fn current_unix_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
 
-    // 2) 未知拉丁字母品牌尝试规范化官网域名（<slug>.com）
-    if let Some(slug) = ascii_domain_slug(brand) {
-        let guessed_domain = format!("{}.com", slug);
-        if !is_blacklisted_host(&guessed_domain) {
-            return fetch_domain_logo(client, &guessed_domain, false).await;
-        }
-    }
+fn load_failed_cooldowns(cache_dir: &Path) -> HashMap<String, f64> {
+    let path = cache_dir.join(FAILED_COOLDOWN_FILE);
+    let Ok(bytes) = fs::read(&path) else {
+        return HashMap::new();
+    };
+    let Ok(map) = serde_json::from_slice::<HashMap<String, f64>>(&bytes) else {
+        return HashMap::new();
+    };
+    let now = current_unix_secs();
+    map.into_iter()
+        .filter(|(_, ts)| now - *ts < FAILED_COOLDOWN_SECS)
+        .collect()
+}
 
-    None
+fn save_failed_cooldowns(cache_dir: &Path, cooldowns: &HashMap<String, f64>) {
+    let now = current_unix_secs();
+    let active: HashMap<&String, &f64> = cooldowns
+        .iter()
+        .filter(|(_, ts)| now - **ts < FAILED_COOLDOWN_SECS)
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec_pretty(&active) {
+        let _ = fs::create_dir_all(cache_dir);
+        let _ = atomic_write_bytes(&cache_dir.join(FAILED_COOLDOWN_FILE), &bytes);
+    }
 }
 
 fn save_cached_logo(
@@ -928,6 +1139,12 @@ async fn fetch_brands_concurrently(
         collect_existing_keys_in_dir(&legacy_dir, &mut protected_keys);
     }
 
+    let mut cooldowns = if skip_cached_in_logo_cache {
+        load_failed_cooldowns(&cache_dir)
+    } else {
+        HashMap::new()
+    };
+
     let mut seen_keys = HashSet::new();
     let mut pending_tasks: Vec<(String, String)> = Vec::new();
     let mut skipped_count: usize = 0;
@@ -946,6 +1163,18 @@ async fn fetch_brands_concurrently(
             skipped_count += 1;
             continue;
         }
+        // 非白名单品牌直接跳过网络请求（展示首字圆形徽章）
+        let Some((_, domain)) = resolve_whitelisted_brand(&trimmed) else {
+            skipped_count += 1;
+            continue;
+        };
+        if skip_cached_in_logo_cache
+            && (cooldowns.contains_key(&format!("brand:{}", key))
+                || cooldowns.contains_key(&format!("domain:{}", domain)))
+        {
+            skipped_count += 1;
+            continue;
+        }
         pending_tasks.push((key, trimmed));
     }
 
@@ -960,9 +1189,9 @@ async fn fetch_brands_concurrently(
     }
 
     let client = build_logo_http_client()?;
-    let cache_dir_arc = Arc::new(cache_dir);
+    let cache_dir_arc = Arc::new(cache_dir.clone());
 
-    let outcomes: Vec<(String, Option<String>)> = stream::iter(pending_tasks)
+    let outcomes: Vec<(String, String, Option<String>)> = stream::iter(pending_tasks)
         .map(|(key, brand)| {
             let client = client.clone();
             let cache_dir = Arc::clone(&cache_dir_arc);
@@ -970,11 +1199,11 @@ async fn fetch_brands_concurrently(
                 match resolve_brand_logo(&client, &brand).await {
                     Some((bytes, mime)) => {
                         match save_cached_logo(cache_dir.as_path(), &key, &bytes, mime) {
-                            Ok(data_url) => (key, Some(data_url)),
-                            Err(_) => (key, None),
+                            Ok(data_url) => (key, brand, Some(data_url)),
+                            Err(_) => (key, brand, None),
                         }
                     }
-                    None => (key, None),
+                    None => (key, brand, None),
                 }
             }
         })
@@ -984,14 +1213,21 @@ async fn fetch_brands_concurrently(
 
     let mut fetched_logos = HashMap::new();
     let mut failed_keys = Vec::new();
+    let now = current_unix_secs();
 
-    for (key, result) in outcomes {
+    for (key, brand, result) in outcomes {
         if let Some(data_url) = result {
+            cooldowns.remove(&format!("brand:{}", key));
             fetched_logos.insert(key, data_url);
         } else {
+            cooldowns.insert(format!("brand:{}", key), now);
+            if let Some((_, domain)) = resolve_whitelisted_brand(&brand) {
+                cooldowns.insert(format!("domain:{}", domain), now);
+            }
             failed_keys.push(key);
         }
     }
+    save_failed_cooldowns(&cache_dir, &cooldowns);
 
     let fetched_count = fetched_logos.len();
     let failed_count = failed_keys.len();
@@ -1013,21 +1249,25 @@ pub async fn fetch_missing_brand_logos(
     fetch_brands_concurrently(&data_dir, brands, true).await
 }
 
-/// 仅清空 LogoCache/（完整保留 CustomLogos/），再并发重抓全部品牌 Logo 并返回完整图标映射
+/// 彻底清空旧 LogoCache/（含 failed_cooldown.json）与旧版 BrandLogos/（完整保留 CustomLogos/），再并发重抓全部白名单品牌 Logo
 pub async fn clear_and_refetch_brand_logos(
     data_dir: PathBuf,
     brands: Vec<String>,
 ) -> Result<BrandLogoFetchResult, String> {
     let cache_dir = data_dir.join(LOGO_CACHE_DIR);
+    let legacy_dir = data_dir.join(LEGACY_LOGOS_DIR);
     if cache_dir.exists() {
         fs::remove_dir_all(&cache_dir)
             .map_err(|e| format!("清理 LogoCache 目录失败: {}", e))?;
+    }
+    if legacy_dir.exists() {
+        let _ = fs::remove_dir_all(&legacy_dir);
     }
     fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("重建 LogoCache 目录失败: {}", e))?;
 
     let mut fetch_res = fetch_brands_concurrently(&data_dir, brands, false).await?;
-    // 重新扫描完整目录（CustomLogos > LogoCache > BrandLogos），保证前端直接拿到完整一致状态
+    // 重新扫描完整目录（CustomLogos > LogoCache），保证前端直接拿到完整一致状态
     fetch_res.logos = load_brand_logos(&data_dir)?;
     Ok(fetch_res)
 }

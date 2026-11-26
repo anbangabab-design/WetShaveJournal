@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -7,12 +7,20 @@ import {
   Loader2,
   RotateCcw,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { auditGearItems, isAIConfigReady } from "../../lib/aiService";
 import { brandDisplay, categoryPluralName, t } from "../../lib/l10n";
+import {
+  clearAiHealthCheckSession,
+  isTauriRuntime,
+  loadAiHealthCheckSession,
+  saveAiHealthCheckSession,
+} from "../../lib/tauriApi";
 import { useJournal } from "../../store/JournalContext";
 import type {
+  AIHealthCheckSession,
   GearAuditBatchFailure,
   GearAuditMergeProposal,
   GearAuditUpdateProposal,
@@ -29,6 +37,68 @@ interface AIHealthCheckModalProps {
 
 type AuditScope = "currentCategory" | "allPending";
 const MAX_RETRY_ROUNDS = 3;
+const LOCAL_STORAGE_SESSION_KEY = "wsj_ai_health_check_session_v1";
+
+function hasActionableSessionContent(session: AIHealthCheckSession): boolean {
+  return (
+    session.updates.length > 0 ||
+    session.merges.length > 0 ||
+    session.failedItems.length > 0 ||
+    session.undeterminedItems.length > 0 ||
+    session.batchFailures.length > 0
+  );
+}
+
+async function readPersistedSession(): Promise<AIHealthCheckSession | null> {
+  try {
+    if (isTauriRuntime()) {
+      const loaded = await loadAiHealthCheckSession();
+      if (loaded && hasActionableSessionContent(loaded)) {
+        return loaded;
+      }
+      return null;
+    }
+    const raw = window.localStorage.getItem(LOCAL_STORAGE_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AIHealthCheckSession;
+    return parsed && hasActionableSessionContent(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writePersistedSession(
+  session: AIHealthCheckSession
+): Promise<void> {
+  try {
+    if (!hasActionableSessionContent(session)) {
+      await removePersistedSession();
+      return;
+    }
+    if (isTauriRuntime()) {
+      await saveAiHealthCheckSession(session);
+    } else {
+      window.localStorage.setItem(
+        LOCAL_STORAGE_SESSION_KEY,
+        JSON.stringify(session)
+      );
+    }
+  } catch {
+    // 缓存写入失败不影响主流程
+  }
+}
+
+async function removePersistedSession(): Promise<void> {
+  try {
+    if (isTauriRuntime()) {
+      await clearAiHealthCheckSession();
+    } else {
+      window.localStorage.removeItem(LOCAL_STORAGE_SESSION_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
 
 export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
   open,
@@ -47,7 +117,9 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
   const [scope, setScope] = useState<AuditScope>("currentCategory");
   const [isAuditing, setIsAuditing] = useState(false);
   const [hasCompleted, setHasCompleted] = useState(false);
+  const [resumedFromDisk, setResumedFromDisk] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [infoBanner, setInfoBanner] = useState<string | null>(null);
   const [modelUsed, setModelUsed] = useState<string | null>(null);
 
   const [updates, setUpdates] = useState<GearAuditUpdateProposal[]>([]);
@@ -71,6 +143,43 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
 
   const cancelledRef = useRef(false);
 
+  const persistSessionSnapshot = useCallback(
+    (snapshot: {
+      scope: AuditScope;
+      modelUsed: string | null;
+      plannedCount: number;
+      verifiedCount: number;
+      skippedCount: number;
+      unknownIdCount: number;
+      retryRound: number;
+      updates: GearAuditUpdateProposal[];
+      merges: GearAuditMergeProposal[];
+      undeterminedItems: GearItem[];
+      failedItems: GearItem[];
+      batchFailures: GearAuditBatchFailure[];
+    }) => {
+      const payload: AIHealthCheckSession = {
+        schemaVersion: 1,
+        savedAt: new Date().toISOString(),
+        scope: snapshot.scope,
+        category: snapshot.scope === "currentCategory" ? initialCategory : null,
+        modelUsed: snapshot.modelUsed,
+        plannedCount: snapshot.plannedCount,
+        verifiedCount: snapshot.verifiedCount,
+        skippedCount: snapshot.skippedCount,
+        unknownOrDuplicateIdCount: snapshot.unknownIdCount,
+        retryRound: snapshot.retryRound,
+        updates: snapshot.updates,
+        merges: snapshot.merges,
+        undeterminedItems: snapshot.undeterminedItems,
+        failedItems: snapshot.failedItems,
+        batchFailures: snapshot.batchFailures,
+      };
+      void writePersistedSession(payload);
+    },
+    [initialCategory]
+  );
+
   useEffect(() => {
     if (!open) {
       cancelledRef.current = true;
@@ -78,6 +187,41 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
     }
     cancelledRef.current = false;
     setErrorMessage(null);
+    setInfoBanner(null);
+
+    let active = true;
+    void readPersistedSession().then((saved) => {
+      if (!active || !saved) return;
+      setScope(saved.scope === "allPending" ? "allPending" : "currentCategory");
+      setModelUsed(saved.modelUsed ?? null);
+      setPlannedCount(saved.plannedCount ?? 0);
+      setVerifiedCount(saved.verifiedCount ?? 0);
+      setSkippedCount(saved.skippedCount ?? 0);
+      setUnknownIdCount(saved.unknownOrDuplicateIdCount ?? 0);
+      setRetryRound(saved.retryRound ?? 0);
+      setUpdates(Array.isArray(saved.updates) ? saved.updates : []);
+      setMerges(Array.isArray(saved.merges) ? saved.merges : []);
+      const restoredUndetermined = Array.isArray(saved.undeterminedItems)
+        ? saved.undeterminedItems
+        : [];
+      const restoredFailed = Array.isArray(saved.failedItems)
+        ? saved.failedItems
+        : [];
+      const restoredBatchFailures = Array.isArray(saved.batchFailures)
+        ? saved.batchFailures
+        : [];
+      setUndeterminedItems(restoredUndetermined);
+      setFailedItems(restoredFailed);
+      setBatchFailures(restoredBatchFailures);
+      setLiveUndeterminedCount(restoredUndetermined.length);
+      setLiveFailedCount(restoredFailed.length);
+      setHasCompleted(true);
+      setResumedFromDisk(true);
+    });
+
+    return () => {
+      active = false;
+    };
   }, [open]);
 
   useEffect(() => {
@@ -110,6 +254,80 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
 
   const ready = isAIConfigReady(aiConfig);
 
+  const handleClearSession = async () => {
+    cancelledRef.current = true;
+    await removePersistedSession();
+    setHasCompleted(false);
+    setResumedFromDisk(false);
+    setErrorMessage(null);
+    setInfoBanner(null);
+    setModelUsed(null);
+    setUpdates([]);
+    setMerges([]);
+    setUndeterminedItems([]);
+    setFailedItems([]);
+    setBatchFailures([]);
+    setPlannedCount(0);
+    setVerifiedCount(0);
+    setSkippedCount(0);
+    setUnknownIdCount(0);
+    setLiveUndeterminedCount(0);
+    setLiveFailedCount(0);
+    setCurrentBatch(0);
+    setTotalBatches(0);
+    setRetryRound(0);
+  };
+
+  const updateProposalsAndPersist = (
+    updater: (prev: GearAuditUpdateProposal[]) => GearAuditUpdateProposal[]
+  ) => {
+    setUpdates((prev) => {
+      const next = updater(prev);
+      if (hasCompleted) {
+        persistSessionSnapshot({
+          scope,
+          modelUsed,
+          plannedCount,
+          verifiedCount,
+          skippedCount,
+          unknownIdCount,
+          retryRound,
+          updates: next,
+          merges,
+          undeterminedItems,
+          failedItems,
+          batchFailures,
+        });
+      }
+      return next;
+    });
+  };
+
+  const updateMergesAndPersist = (
+    updater: (prev: GearAuditMergeProposal[]) => GearAuditMergeProposal[]
+  ) => {
+    setMerges((prev) => {
+      const next = updater(prev);
+      if (hasCompleted) {
+        persistSessionSnapshot({
+          scope,
+          modelUsed,
+          plannedCount,
+          verifiedCount,
+          skippedCount,
+          unknownIdCount,
+          retryRound,
+          updates,
+          merges: next,
+          undeterminedItems,
+          failedItems,
+          batchFailures,
+        });
+      }
+      return next;
+    });
+  };
+
   const runAudit = async () => {
     const itemsToAudit = targetItems;
     if (itemsToAudit.length === 0) return;
@@ -117,7 +335,9 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
     cancelledRef.current = false;
     setIsAuditing(true);
     setHasCompleted(false);
+    setResumedFromDisk(false);
     setErrorMessage(null);
+    setInfoBanner(null);
     setUpdates([]);
     setMerges([]);
     setUndeterminedItems([]);
@@ -158,6 +378,20 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
       setLiveFailedCount(report.failedItems.length);
       setBatchFailures(report.failures);
       setHasCompleted(true);
+      persistSessionSnapshot({
+        scope,
+        modelUsed: report.modelUsed,
+        plannedCount: report.plannedCount,
+        verifiedCount: report.verifiedCount,
+        skippedCount: report.skippedCount,
+        unknownIdCount: report.unknownOrDuplicateIdCount,
+        retryRound: 0,
+        updates: report.updates,
+        merges: report.merges,
+        undeterminedItems: report.undeterminedItems,
+        failedItems: report.failedItems,
+        batchFailures: report.failures,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMessage(msg);
@@ -167,22 +401,24 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
   };
 
   const runRetryFailedOnly = async () => {
-    if (failedItems.length === 0 || retryRound >= MAX_RETRY_ROUNDS) return;
+    const retryingFailedOnly = failedItems.length > 0;
+    const itemsToRetry = retryingFailedOnly ? [...failedItems] : [...undeterminedItems];
+    if (itemsToRetry.length === 0 || retryRound >= MAX_RETRY_ROUNDS) return;
 
     cancelledRef.current = false;
     const nextRound = retryRound + 1;
     setRetryRound(nextRound);
-    const itemsToRetry = [...failedItems];
     const baseVerified = verifiedCount;
     const baseSkipped = skippedCount;
     const baseBadIds = unknownIdCount;
-    const baseUndetermined = [...undeterminedItems];
+    const baseUndetermined = retryingFailedOnly ? [...undeterminedItems] : [];
 
     setIsAuditing(true);
     setErrorMessage(null);
+    setInfoBanner(null);
     setCurrentBatch(0);
     setTotalBatches(0);
-    setLiveFailedCount(itemsToRetry.length);
+    setLiveFailedCount(failedItems.length);
 
     try {
       const report = await auditGearItems(itemsToRetry, aiConfig, isEnglish, {
@@ -199,10 +435,9 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
         },
       });
 
-      setModelUsed(report.modelUsed);
-      setVerifiedCount(baseVerified + report.verifiedCount);
-      setSkippedCount(baseSkipped + report.skippedCount);
-      setUnknownIdCount(baseBadIds + report.unknownOrDuplicateIdCount);
+      const nextVerified = baseVerified + report.verifiedCount;
+      const nextSkipped = baseSkipped + report.skippedCount;
+      const nextBadIds = baseBadIds + report.unknownOrDuplicateIdCount;
 
       const mergedUndetermined = [...baseUndetermined];
       for (const u of report.undeterminedItems) {
@@ -210,27 +445,52 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
           mergedUndetermined.push(u);
         }
       }
+
+      const nextUpdates = [...updates];
+      for (const u of report.updates) {
+        const idx = nextUpdates.findIndex((ex) => ex.id === u.id);
+        if (idx >= 0) {
+          nextUpdates[idx] = u;
+        } else {
+          nextUpdates.push(u);
+        }
+      }
+
+      const nextMerges = [...merges];
+      for (const m of report.merges) {
+        if (!nextMerges.some((ex) => ex.id === m.id)) {
+          nextMerges.push(m);
+        }
+      }
+
+      setModelUsed(report.modelUsed);
+      setVerifiedCount(nextVerified);
+      setSkippedCount(nextSkipped);
+      setUnknownIdCount(nextBadIds);
       setUndeterminedItems(mergedUndetermined);
       setFailedItems(report.failedItems);
       setLiveUndeterminedCount(mergedUndetermined.length);
       setLiveFailedCount(report.failedItems.length);
       setBatchFailures(report.failures);
-
-      setUpdates((prev) => {
-        const next = [...prev];
-        for (const u of report.updates) {
-          if (!next.some((ex) => ex.id === u.id)) next.push(u);
-        }
-        return next;
-      });
-      setMerges((prev) => {
-        const next = [...prev];
-        for (const m of report.merges) {
-          if (!next.some((ex) => ex.id === m.id)) next.push(m);
-        }
-        return next;
-      });
+      setUpdates(nextUpdates);
+      setMerges(nextMerges);
       setHasCompleted(true);
+      setResumedFromDisk(false);
+
+      persistSessionSnapshot({
+        scope,
+        modelUsed: report.modelUsed,
+        plannedCount,
+        verifiedCount: nextVerified,
+        skippedCount: nextSkipped,
+        unknownIdCount: nextBadIds,
+        retryRound: nextRound,
+        updates: nextUpdates,
+        merges: nextMerges,
+        undeterminedItems: mergedUndetermined,
+        failedItems: report.failedItems,
+        batchFailures: report.failures,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMessage(msg);
@@ -240,13 +500,64 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
   };
 
   const handleApply = async () => {
-    if (isApplying || isReadOnlyProtected) return;
+    if (isApplying || isReadOnlyProtected || selectedCount === 0) return;
+    const appliedUpdateIds = new Set(
+      updates.filter((u) => u.selected).map((u) => u.id)
+    );
+    const appliedMergeIds = new Set(
+      merges.filter((m) => m.selected).map((m) => m.id)
+    );
+    const totalApplied = appliedUpdateIds.size + appliedMergeIds.size;
+
     setIsApplying(true);
     setErrorMessage(null);
-    const res = await applyAuditProposals(updates, merges, undeterminedItems);
+    // 仅应用本次勾选的建议；原样保留所有未勾选待确认项与失败批次，不自动关闭弹窗
+    const res = await applyAuditProposals(updates, merges, []);
     setIsApplying(false);
+
     if (res.ok) {
-      onClose();
+      const remainingUpdates = updates.filter(
+        (u) => !appliedUpdateIds.has(u.id)
+      );
+      const remainingMerges = merges.filter((m) => !appliedMergeIds.has(m.id));
+      setUpdates(remainingUpdates);
+      setMerges(remainingMerges);
+      setResumedFromDisk(false);
+
+      persistSessionSnapshot({
+        scope,
+        modelUsed,
+        plannedCount,
+        verifiedCount,
+        skippedCount,
+        unknownIdCount,
+        retryRound,
+        updates: remainingUpdates,
+        merges: remainingMerges,
+        undeterminedItems,
+        failedItems,
+        batchFailures,
+      });
+
+      const remainProposals = remainingUpdates.length + remainingMerges.length;
+      const remainIncomplete = failedItems.length + undeterminedItems.length;
+      if (remainProposals === 0 && remainIncomplete === 0) {
+        setInfoBanner(
+          t(
+            `已应用 ${totalApplied} 项修改，本次体检全部处理完毕。`,
+            `Applied ${totalApplied} change(s). All audit items are now resolved.`,
+            isEnglish
+          )
+        );
+      } else {
+        setInfoBanner(
+          t(
+            `已应用 ${totalApplied} 项修改；仍保留 ${remainProposals} 项未勾选建议与 ${remainIncomplete} 项未完成/失败项，可继续操作或点击「仅重试失败项」。`,
+            `Applied ${totalApplied} change(s). ${remainProposals} unselected suggestion(s) and ${remainIncomplete} incomplete/failed item(s) remain preserved.`,
+            isEnglish
+          )
+        );
+      }
     } else if (res.error) {
       setErrorMessage(res.error);
     }
@@ -256,6 +567,8 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
   const displayedUndetermined = isAuditing
     ? liveUndeterminedCount
     : undeterminedItems.length;
+  const retryableCount =
+    failedItems.length > 0 ? failedItems.length : undeterminedItems.length;
 
   return (
     <div
@@ -268,17 +581,23 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
         {/* 头部 */}
         <div className="flex items-center justify-between gap-3 border-b border-[var(--wsj-border)] bg-[var(--wsj-card)] px-6 py-4">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Sparkles className="h-4 w-4 text-[var(--wsj-accent)]" />
               <h2 className="text-[18.5px] font-bold text-[var(--wsj-text)]">
                 {t("AI 器材库体检", "AI Gear Audit", isEnglish)}
               </h2>
+              {resumedFromDisk && hasCompleted && (
+                <TagPill
+                  text={t("已恢复上次进度", "Resumed Session", isEnglish)}
+                  tone="forest"
+                />
+              )}
               {modelUsed && <TagPill text={modelUsed} tone="accent" />}
             </div>
             <p className="mt-1 text-[12.5px] text-[var(--wsj-text-secondary)]">
               {t(
-                "每批 6–8 件、180 秒超时深度核验官网参数与疑似重复项；不确定项标为待确认绝不编造，确认勾选后再写入并支持一键撤销。",
-                "Audits 6–8 items per batch (180s timeout). Uncertain items stay pending without fabrication. Review diffs before applying; one-click undo supported.",
+                "应用勾选后不关闭弹窗，原样保留未勾选建议与失败批次；进度自动持久化至 ai_health_check_session.json，关闭或重启后自动断点续做。",
+                "Applying keeps the modal open with remaining suggestions and failed batches intact. Session progress persists to ai_health_check_session.json.",
                 isEnglish
               )}
             </p>
@@ -355,27 +674,43 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                 </button>
               </div>
 
-              {isAuditing ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    cancelledRef.current = true;
-                  }}
-                  className="rounded-lg border border-[var(--wsj-border)] bg-[var(--wsj-card)] px-4 py-1.5 text-[13px] font-medium text-[var(--wsj-text)] hover:bg-[var(--wsj-subtle)]"
-                >
-                  {t("取消体检", "Cancel Audit", isEnglish)}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={targetItems.length === 0}
-                  onClick={() => void runAudit()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--wsj-accent)] px-4 py-1.5 text-[13px] font-semibold text-white transition hover:opacity-90 disabled:opacity-45"
-                >
-                  <Sparkles className="h-3.5 w-3.5" />
-                  {t("开始 AI 体检", "Start Audit", isEnglish)}
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {isAuditing ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      cancelledRef.current = true;
+                    }}
+                    className="rounded-lg border border-[var(--wsj-border)] bg-[var(--wsj-card)] px-4 py-1.5 text-[13px] font-medium text-[var(--wsj-text)] hover:bg-[var(--wsj-subtle)]"
+                  >
+                    {t("取消体检", "Cancel Audit", isEnglish)}
+                  </button>
+                ) : (
+                  <>
+                    {hasCompleted && (
+                      <button
+                        type="button"
+                        onClick={() => void handleClearSession()}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--wsj-border)] bg-[var(--wsj-card)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--wsj-text)] transition hover:bg-[var(--wsj-subtle)]"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-[var(--wsj-text-secondary)]" />
+                        {t("清空记录", "Clear Session", isEnglish)}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={targetItems.length === 0}
+                      onClick={() => void runAudit()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--wsj-accent)] px-4 py-1.5 text-[13px] font-semibold text-white transition hover:opacity-90 disabled:opacity-45"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      {hasCompleted
+                        ? t("重新体检", "Re-Audit", isEnglish)
+                        : t("开始 AI 体检", "Start Audit", isEnglish)}
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
           )}
 
@@ -383,6 +718,23 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
             <div className="flex items-center gap-2 rounded-lg bg-[#CC3D3D]/10 px-3 py-2 text-[12.5px] text-[#CC3D3D]">
               <AlertTriangle className="h-4 w-4 shrink-0" />
               <span className="break-words">{errorMessage}</span>
+            </div>
+          )}
+
+          {infoBanner && (
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-[#2E8F5C]/12 px-3 py-2 text-[12.5px] text-[var(--wsj-text)]">
+              <div className="flex items-center gap-2 min-w-0">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-[#2E8F5C]" />
+                <span className="break-words">{infoBanner}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setInfoBanner(null)}
+                className="shrink-0 rounded p-0.5 text-[var(--wsj-text-secondary)] hover:text-[var(--wsj-text)]"
+                aria-label="Dismiss"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             </div>
           )}
 
@@ -424,7 +776,7 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                 />
               )}
 
-              {!isAuditing && failedItems.length > 0 && (
+              {!isAuditing && retryableCount > 0 && (
                 <button
                   type="button"
                   disabled={retryRound >= MAX_RETRY_ROUNDS}
@@ -438,11 +790,17 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                         `Retry Limit (${MAX_RETRY_ROUNDS})`,
                         isEnglish
                       )
-                    : t(
-                        `仅重试失败项 (${failedItems.length})`,
-                        `Retry Failed Only (${failedItems.length})`,
-                        isEnglish
-                      )}
+                    : failedItems.length > 0
+                      ? t(
+                          `仅重试失败项 (${failedItems.length})`,
+                          `Retry Failed Only (${failedItems.length})`,
+                          isEnglish
+                        )
+                      : t(
+                          `重试待确认项 (${undeterminedItems.length})`,
+                          `Retry Uncertain (${undeterminedItems.length})`,
+                          isEnglish
+                        )}
                 </button>
               )}
             </div>
@@ -507,8 +865,8 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                 <CheckCircle2 className="h-9 w-9 text-[#2E8F5C]" />
                 <p className="text-[14px] font-medium text-[var(--wsj-text-secondary)]">
                   {t(
-                    "全部器材命名与参数均很规范，暂未发现需要修正或合并的条目",
-                    "All checked items look clean — no fixes or merges needed.",
+                    "全部器材命名与参数已处理完毕，暂未发现需要修正或合并的条目",
+                    "All checked items look clean — no fixes or merges remaining.",
                     isEnglish
                   )}
                 </p>
@@ -529,7 +887,7 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                         <button
                           type="button"
                           onClick={() =>
-                            setUpdates((prev) =>
+                            updateProposalsAndPersist((prev) =>
                               prev.map((u) => ({ ...u, selected: true }))
                             )
                           }
@@ -540,7 +898,7 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                         <button
                           type="button"
                           onClick={() =>
-                            setUpdates((prev) =>
+                            updateProposalsAndPersist((prev) =>
                               prev.map((u) => ({ ...u, selected: false }))
                             )
                           }
@@ -560,7 +918,7 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                           type="checkbox"
                           checked={prop.selected}
                           onChange={(e) =>
-                            setUpdates((prev) =>
+                            updateProposalsAndPersist((prev) =>
                               prev.map((u) =>
                                 u.id === prop.id
                                   ? { ...u, selected: e.target.checked }
@@ -620,7 +978,7 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                           type="checkbox"
                           checked={m.selected}
                           onChange={(e) =>
-                            setMerges((prev) =>
+                            updateMergesAndPersist((prev) =>
                               prev.map((x) =>
                                 x.id === m.id
                                   ? { ...x, selected: e.target.checked }
@@ -650,11 +1008,11 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
                 )}
               </div>
             ) : (
-              <div className="flex h-full items-center justify-center text-[13.5px] text-[var(--wsj-text-secondary)]">
+              <div className="flex h-full items-center justify-center px-6 text-center text-[13.5px] text-[var(--wsj-text-secondary)]">
                 {hasCompleted
                   ? t(
-                      "部分条目无法核验或失败，请查看上方状态或点击「仅重试失败项」",
-                      "Some items failed or remained uncertain. Review status above or retry failed items.",
+                      "待应用建议已全部处理，但仍有失败或待确认条目，可直接点击上方「仅重试失败项」继续完成。",
+                      "No pending suggestions left, but failed or uncertain items remain. Click Retry above to continue.",
                       isEnglish
                     )
                   : t(
@@ -672,8 +1030,8 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
           <div className="text-[12.5px] text-[var(--wsj-text-secondary)]">
             {hasCompleted && (updates.length > 0 || merges.length > 0)
               ? t(
-                  `已勾选 ${selectedCount} 项改动（写入前自动备份，可随时撤销）`,
-                  `${selectedCount} change(s) selected (auto-backed up; undoable)`,
+                  `已勾选 ${selectedCount} 项改动（应用后保留未勾选与失败项，可随时撤销）`,
+                  `${selectedCount} selected (unselected & failed items preserved; undoable)`,
                   isEnglish
                 )
               : ""}
@@ -691,13 +1049,11 @@ export const AIHealthCheckModal: React.FC<AIHealthCheckModalProps> = ({
               {t("关闭", "Close", isEnglish)}
             </button>
 
-            {(updates.length > 0 ||
-              merges.length > 0 ||
-              undeterminedItems.length > 0) && (
+            {(updates.length > 0 || merges.length > 0) && (
               <button
                 type="button"
                 disabled={
-                  (selectedCount === 0 && undeterminedItems.length === 0) ||
+                  selectedCount === 0 ||
                   isReadOnlyProtected ||
                   isAuditing ||
                   isApplying

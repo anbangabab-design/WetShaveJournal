@@ -12,6 +12,7 @@ use uuid::Uuid;
 /// 确保新建的 journal.json 中 `lastSync` 与 Mac 版 `Date().timeIntervalSinceReferenceDate` 100% 兼容
 const APPLE_REFERENCE_EPOCH_OFFSET: f64 = 978_307_200.0;
 const JOURNAL_FILE_NAME: &str = "journal.json";
+const AI_AUDIT_SESSION_FILE_NAME: &str = "ai_health_check_session.json";
 const BACKUPS_DIR_NAME: &str = "Backups";
 const DEFAULT_MAX_BACKUPS: usize = 30;
 
@@ -458,6 +459,43 @@ pub fn export_journal(data_dir: &Path, target_path: &Path) -> Result<String, Str
 pub fn export_text_file(target_path: &Path, content: &str) -> Result<String, String> {
     atomic_write_bytes(target_path, content.as_bytes())?;
     Ok(target_path.to_string_lossy().to_string())
+}
+
+/// 读取 AI 体检轻量会话缓存（数据目录 ai_health_check_session.json）
+pub fn load_ai_health_check_session(data_dir: &Path) -> Result<Option<Value>, String> {
+    let path = data_dir.join(AI_AUDIT_SESSION_FILE_NAME);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path)
+        .map_err(|e| format!("读取 AI 体检会话缓存失败: {}", e))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(val) if val.is_object() => Ok(Some(val)),
+        _ => Ok(None),
+    }
+}
+
+/// 原子保存 AI 体检轻量会话缓存（支持断点续做）
+pub fn save_ai_health_check_session(data_dir: &Path, session: Value) -> Result<(), String> {
+    if !session.is_object() {
+        return Err("AI 体检会话数据必须是 JSON 对象".to_string());
+    }
+    let bytes = serde_json::to_vec_pretty(&session)
+        .map_err(|e| format!("序列化 AI 体检会话失败: {}", e))?;
+    atomic_write_bytes(&data_dir.join(AI_AUDIT_SESSION_FILE_NAME), &bytes)
+}
+
+/// 清空 AI 体检会话缓存文件
+pub fn clear_ai_health_check_session(data_dir: &Path) -> Result<(), String> {
+    let path = data_dir.join(AI_AUDIT_SESSION_FILE_NAME);
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|e| format!("清理 AI 体检会话缓存失败: {}", e))?;
+    }
+    Ok(())
 }
 
 pub fn open_folder(path: &Path) -> Result<(), String> {

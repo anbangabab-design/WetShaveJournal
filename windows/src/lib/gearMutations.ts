@@ -15,6 +15,8 @@ import {
   type RazorType,
 } from "../types/journal";
 import {
+  getItemCanonicalDisplayName,
+  getOverrideCanonicalDisplayName,
   getSpecTags,
   inferDefaultOverride,
   inferMaterial,
@@ -493,6 +495,7 @@ export function getRemovalKeysForItem(item: GearItem): Set<string> {
   const keys = new Set<string>(item.rawKeys);
   keys.add(item.canonicalKey);
   keys.add(`${item.category}|${normalizeKey(item.name)}`);
+  keys.add(`${item.category}|${normalizeKey(getItemCanonicalDisplayName(item))}`);
   return keys;
 }
 
@@ -629,6 +632,25 @@ export function planUpdateGearItem(
     nextPending = nextPending.filter((k) => k !== newNormKey);
   } else if (rawKeys.length === 0 && !nextPending.includes(newNormKey)) {
     nextPending.push(newNormKey);
+  }
+
+  const canonicalDisplayKey = `${category}|${normalizeKey(
+    getOverrideCanonicalDisplayName(cleanOverride)
+  )}`;
+  if (canonicalDisplayKey !== newNormKey) {
+    const existingAtCanonical = nextOverrides[canonicalDisplayKey];
+    const sameIdentityOrEmpty =
+      !existingAtCanonical ||
+      (existingAtCanonical.brand.toLowerCase() ===
+        cleanOverride.brand.toLowerCase() &&
+        existingAtCanonical.name.toLowerCase() ===
+          cleanOverride.name.toLowerCase());
+    if (sameIdentityOrEmpty) {
+      nextOverrides[canonicalDisplayKey] = cleanOverride;
+      if (clearPending) {
+        nextPending = nextPending.filter((k) => k !== canonicalDisplayKey);
+      }
+    }
   }
 
   const nextHistory = pushHistorySnapshot(db);
@@ -1029,6 +1051,18 @@ export function planApplyAuditProposals(
       pendingSet.delete(newNormKey);
     } else {
       pendingSet.add(newNormKey);
+    }
+    const canonicalDisplayKey = `${u.item.category}|${normalizeKey(
+      getOverrideCanonicalDisplayName(clean)
+    )}`;
+    if (
+      canonicalDisplayKey !== newNormKey &&
+      !nextOverrides[canonicalDisplayKey]
+    ) {
+      nextOverrides[canonicalDisplayKey] = clean;
+      if (u.confidence >= 0.72) {
+        pendingSet.delete(canonicalDisplayKey);
+      }
     }
     appliedUpdates += 1;
   }

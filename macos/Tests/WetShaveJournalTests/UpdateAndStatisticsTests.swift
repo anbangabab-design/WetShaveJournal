@@ -446,4 +446,42 @@ final class UpdateAndStatisticsTests: XCTestCase {
         XCTAssertEqual(p2?.irritation, .mild)
         XCTAssertEqual(p2?.note, "略拉扯")
     }
+
+    func testDMGStrictlyPreferredOverPKGAndZIP() throws {
+        let validDigest = "sha256:" + String(repeating: "c", count: 64)
+        let apiJSON = """
+        {
+          "tag_name": "v1.4.1",
+          "name": "v1.4.1",
+          "body": "## 简体中文\\n测试 DMG 优先\\n\\n## English\\nDMG priority",
+          "html_url": "https://github.com/anbangabab-design/WetShaveJournal/releases/tag/v1.4.1",
+          "draft": false,
+          "prerelease": false,
+          "assets": [
+            {
+              "name": "WetShaveJournal-1.4.1-arm64.pkg",
+              "browser_download_url": "https://github.com/anbangabab-design/WetShaveJournal/releases/download/v1.4.1/WetShaveJournal-1.4.1-arm64.pkg",
+              "size": 4096,
+              "digest": "\(validDigest)"
+            },
+            {
+              "name": "WetShaveJournal-1.4.1-arm64.dmg",
+              "browser_download_url": "https://github.com/anbangabab-design/WetShaveJournal/releases/download/v1.4.1/WetShaveJournal-1.4.1-arm64.dmg",
+              "size": 5120,
+              "digest": "\(validDigest)"
+            },
+            {
+              "name": "WetShaveJournal-1.4.1-x64-setup.exe",
+              "browser_download_url": "https://github.com/anbangabab-design/WetShaveJournal/releases/download/v1.4.1/WetShaveJournal-1.4.1-x64-setup.exe",
+              "size": 8192,
+              "digest": "\(validDigest)"
+            }
+          ]
+        }
+        """
+
+        let info = try UpdateReleaseParser.decodeAPIRelease(Data(apiJSON.utf8))
+        XCTAssertEqual(info.version, "1.4.1")
+        XCTAssertEqual(info.matchedAsset?.name, "WetShaveJournal-1.4.1-arm64.dmg")
+    }
 }

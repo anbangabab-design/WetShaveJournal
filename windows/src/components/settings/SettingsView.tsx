@@ -1033,7 +1033,7 @@ export const SettingsView: React.FC = () => {
                   <span className="text-[17px] font-bold text-[var(--wsj-text)]">
                     {t("湿剃日记", "WetShaveJournal", isEnglish)}
                   </span>
-                  <TagPill text="v1.4.0" tone="accent" />
+                  <TagPill text="v1.4.1" tone="accent" />
                   <TagPill text="Windows · Tauri 2" tone="neutral" />
                 </div>
                 <p className="text-[13px] leading-relaxed text-[var(--wsj-text-secondary)]">

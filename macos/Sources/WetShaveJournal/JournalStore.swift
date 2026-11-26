@@ -257,13 +257,36 @@ final class JournalStore: ObservableObject {
     // MARK: - 日记增删改（含 S05 删除墓碑保护与云盘双端删除墓碑）
 
     @discardableResult
-    func upsertEntry(_ entry: JournalEntry) -> Result<Void, Error> {
+    func upsertEntry(
+        _ entry: JournalEntry,
+        selectedGearBindings: [(category: GearCategory, insertedText: String, item: GearItem)] = []
+    ) -> Result<Void, Error> {
         var candidate = database
         var updated = entry
         updated.locallyModified = true
         updated.hasSyncConflict = nil
         updated.suspectedDuplicate = nil
         updated.updatedAt = SyncTimestamp.nowISO8601()
+
+        // 若用户在新建/编辑 SOTD 时通过联想菜单点选了某件器材的规范显示名，
+        // 为该规范名持久化一条同源 override 映射，确保与历史别名 100% 归为同一器材绝不分裂
+        for binding in selectedGearBindings {
+            let trimmed = binding.insertedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let effectiveRaw = binding.category == .blade
+                ? GearKnowledgeBase.parseBladeUsage(trimmed).baseName
+                : trimmed
+            let normKey = "\(binding.category.rawValue)|\(GearKnowledgeBase.normalizeKey(effectiveRaw))"
+            if candidate.overrides[normKey] == nil {
+                var targetOv = GearSanitizer.sanitizeOverride(
+                    GearOverride.from(item: binding.item),
+                    category: binding.category
+                )
+                targetOv.updatedAt = updated.updatedAt
+                candidate.overrides[normKey] = targetOv
+                candidate.pending.removeAll { $0 == normKey }
+            }
+        }
 
         if var tombstones = candidate.deletedEntryIds {
             tombstones.removeValue(forKey: updated.id)

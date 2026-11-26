@@ -249,6 +249,27 @@ fn export_csv(target_path: String, content: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn load_ai_health_check_session() -> Result<Option<Value>, String> {
+    let cfg = load_persisted_config()?;
+    let active_dir = resolve_active_data_dir(&cfg)?;
+    storage::load_ai_health_check_session(&active_dir)
+}
+
+#[tauri::command]
+fn save_ai_health_check_session(session: Value) -> Result<(), String> {
+    let cfg = load_persisted_config()?;
+    let active_dir = resolve_active_data_dir(&cfg)?;
+    storage::save_ai_health_check_session(&active_dir, session)
+}
+
+#[tauri::command]
+fn clear_ai_health_check_session() -> Result<(), String> {
+    let cfg = load_persisted_config()?;
+    let active_dir = resolve_active_data_dir(&cfg)?;
+    storage::clear_ai_health_check_session(&active_dir)
+}
+
+#[tauri::command]
 fn set_cloud_sync_dir(path: Option<String>) -> Result<AppConfigResponse, String> {
     let mut cfg = load_persisted_config()?;
     let normalized = path
@@ -367,6 +388,9 @@ pub fn run() {
             fetch_missing_brand_logos,
             clear_and_refetch_brand_logos,
             export_csv,
+            load_ai_health_check_session,
+            save_ai_health_check_session,
+            clear_ai_health_check_session,
             set_cloud_sync_dir,
             sync_cloud_journal,
             open_cloud_sync_folder,
