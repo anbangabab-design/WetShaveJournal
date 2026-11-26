@@ -1,0 +1,36 @@
+[package]
+name = "wetshave-journal-windows"
+version = "1.4.0"
+description = "湿剃日记 Windows 版 · WetShaveJournal for Windows"
+authors = ["WetShaveJournal"]
+edition = "2021"
+
+[lib]
+name = "wetshave_journal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["clock"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json", "stream"] }
+futures-util = "0.3"
+regex = "1"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+keyring = { version = "3" }
