@@ -5,11 +5,11 @@ import SwiftUI
 
 enum AppMetadata {
     static var version: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.2"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.3"
     }
 
     static var build: String {
-        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "20"
+        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "21"
     }
 }
 

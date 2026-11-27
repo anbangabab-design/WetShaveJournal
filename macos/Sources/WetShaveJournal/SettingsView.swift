@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var showAPIKey: Bool = false
     @State private var isTestingAI: Bool = false
     @State private var aiTestResult: (ok: Bool, message: String)? = nil
+    @State private var showBatchLogoFinder: Bool = false
 
     private var appIconImage: NSImage {
         if let icnsPath = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
@@ -277,6 +278,13 @@ struct SettingsView: View {
                                 exportCSV()
                             } label: {
                                 Label(L10n.t("导出 CSV", "Export CSV"), systemImage: "square.and.arrow.up")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button {
+                                showBatchLogoFinder = true
+                            } label: {
+                                Label(L10n.t("AI 补全缺失品牌 Logo", "AI Find Missing Logos"), systemImage: "sparkles.rectangle.stack")
                             }
                             .buttonStyle(.bordered)
 
@@ -589,6 +597,10 @@ struct SettingsView: View {
             .padding(28)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(isPresented: $showBatchLogoFinder) {
+            AIBatchLogoFinderSheet()
+                .environmentObject(store)
         }
     }
 

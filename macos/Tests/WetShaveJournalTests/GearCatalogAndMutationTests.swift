@@ -180,7 +180,7 @@ final class GearCatalogAndMutationTests: XCTestCase {
 
         let dsc = BrandLogoCache.resolveWhitelistedBrand("帝诗")
         XCTAssertEqual(dsc?.canonical, "DSCosmetic")
-        XCTAssertEqual(dsc?.domain, "dscosmetic.com")
+        XCTAssertEqual(dsc?.domain, "http://dscosmetic.com")
 
         let hybrid = BrandLogoCache.resolveWhitelistedBrand("Chisel & Hound × Turn-N-Shave")
         XCTAssertEqual(hybrid?.canonical, "Chisel & Hound")
@@ -209,7 +209,7 @@ final class GearCatalogAndMutationTests: XCTestCase {
             ("Elysian Soap Shop", "elysiansoapshop.com"),
             ("RazoRock", "italianbarber.com"),
             ("RR", "italianbarber.com"),
-            ("HAGS", "haveagreatshave.com"),
+            ("HAGS", "hagsartisan.com"),
             ("HLS", "homelikeshaving.ru"),
             ("HomeLikeShaving", "homelikeshaving.ru"),
             ("Cella", "cellamilano.it"),
@@ -252,15 +252,17 @@ final class GearCatalogAndMutationTests: XCTestCase {
             ("Proraso", "proraso.com"),
             ("Thayers", "thayers.com"),
             ("Old Spice", "oldspice.com"),
-            ("Clubman Pinaud", "clubmanonline.com"),
+            ("Clubman Pinaud", "clubman.com"),
             ("CeraVe", "cerave.com"),
-            // 全部刀片
+            ("Arno", "arnoshavingbrush.com"),
+            ("Amonatura", "amonaturastore.com"),
+            ("AKA", "akabrushworx.com"),
+            ("LAXO", "aura-craft.com/laxo/"),
+            // 全部刀片（Astra 与 Wizamet 指向独立内置 PNG，不再共享 gillette.com）
             ("Personna", "personna.com"),
             ("Feather", "feather.co.jp"),
             ("Kai", "kai-group.com"),
             ("Schick", "schick.com"),
-            ("Astra", "gillette.com"),
-            ("Wizamet", "gillette.com"),
             ("Dorco", "dorcousa.com"),
             // 增量补齐
             ("Wolfman", "wolfmanrazors.com"),
@@ -275,10 +277,10 @@ final class GearCatalogAndMutationTests: XCTestCase {
             ("Paladin", "paladinshaving.com"),
             ("TNS", "turnnshave.com"),
             ("Brad Sears", "bradsearsshaveworks.com"),
-            ("Yaqi", "yaqishaving.com"),
+            ("Yaqi", "yaqibrush.com"),
             ("Aylsworth", "aylsworthrazors.com"),
             ("Rocnel", "rocnel.com"),
-            ("Lambda", "lambdarazors.com"),
+            ("Lambda", "lambda-razors.com"),
             ("WestMan", "westmanshaving.com"),
             ("Semogue", "portuguesefactory.com"),
             ("The CaYuen Workshop", "cayuenworkshop.com")
@@ -327,11 +329,17 @@ final class GearCatalogAndMutationTests: XCTestCase {
             return rep.representation(using: .png, properties: [:])!
         }
 
-        // 写入 3 种不同尺寸的图片区分来源：Custom(48) > Bundled(36) > LogoCache(24)
+        // 写入不同尺寸的图片区分来源：Custom(48) > Bundled(独立尺寸) > LogoCache(24)
         try makeSolidPNG(size: 48, color: .systemRed).write(to: customDir.appendingPathComponent("blackland.png"))
         try makeSolidPNG(size: 36, color: .systemGreen).write(to: bundled.appendingPathComponent("blackland.png"))
         try makeSolidPNG(size: 36, color: .systemGreen).write(to: bundled.appendingPathComponent("gillette.png"))
         try makeSolidPNG(size: 36, color: .systemGreen).write(to: bundled.appendingPathComponent("le_pere_lucien.png"))
+        try makeSolidPNG(size: 32, color: .systemBlue).write(to: bundled.appendingPathComponent("astra.png"))
+        try makeSolidPNG(size: 34, color: .systemIndigo).write(to: bundled.appendingPathComponent("wizamet.png"))
+        try makeSolidPNG(size: 38, color: .systemOrange).write(to: bundled.appendingPathComponent("dg.png"))
+        try makeSolidPNG(size: 40, color: .systemTeal).write(to: bundled.appendingPathComponent("ethos.png"))
+        try makeSolidPNG(size: 42, color: .systemPurple).write(to: bundled.appendingPathComponent("tns.png"))
+        try makeSolidPNG(size: 44, color: .systemPink).write(to: bundled.appendingPathComponent("twoface.png"))
         try makeSolidPNG(size: 24, color: .systemBlue).write(to: cacheDir.appendingPathComponent("blackland.png"))
         try makeSolidPNG(size: 24, color: .systemBlue).write(to: cacheDir.appendingPathComponent("wolfman.png"))
 
@@ -341,13 +349,15 @@ final class GearCatalogAndMutationTests: XCTestCase {
         let blacklandImg = try XCTUnwrap(logoCache.logoImage(for: "Blackland"))
         XCTAssertEqual(blacklandImg.representations.first?.pixelsWide, 48)
 
-        // 2. BrandLogos/ 支持重音品牌与域名共享品牌（Astra / Wizamet → gillette.png）离线秒开
+        // 2. BrandLogos/ 支持重音品牌、简称别名及独立刀片（Astra/Wizamet 各自指向独立 PNG，绝不回落 gillette.png）
         let lplImg = try XCTUnwrap(logoCache.logoImage(for: "Le Père Lucien"))
         XCTAssertEqual(lplImg.representations.first?.pixelsWide, 36)
-        let astraImg = try XCTUnwrap(logoCache.logoImage(for: "Astra"))
-        XCTAssertEqual(astraImg.representations.first?.pixelsWide, 36)
-        let wizametImg = try XCTUnwrap(logoCache.logoImage(for: "Wizamet"))
-        XCTAssertEqual(wizametImg.representations.first?.pixelsWide, 36)
+        XCTAssertEqual(logoCache.logoImage(for: "Astra")?.representations.first?.pixelsWide, 32)
+        XCTAssertEqual(logoCache.logoImage(for: "Wizamet")?.representations.first?.pixelsWide, 34)
+        XCTAssertEqual(logoCache.logoImage(for: "Declaration Grooming")?.representations.first?.pixelsWide, 38)
+        XCTAssertEqual(logoCache.logoImage(for: "Ethos Grooming Essentials")?.representations.first?.pixelsWide, 40)
+        XCTAssertEqual(logoCache.logoImage(for: "Turn-N-Shave")?.representations.first?.pixelsWide, 42)
+        XCTAssertEqual(logoCache.logoImage(for: "TwoFace Brothers")?.representations.first?.pixelsWide, 44)
 
         // 3. LogoCache/ 作为第 3 级兜底
         let wolfmanImg = try XCTUnwrap(logoCache.logoImage(for: "Wolfman"))

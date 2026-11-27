@@ -48,6 +48,7 @@ struct GearEditorSheet: View {
     @State private var rawKeyToSplit: String? = nil
     @State private var itemToDelete: GearItem? = nil
     @State private var saveErrorMessage: String? = nil
+    @State private var showAILogoFinder: Bool = false
 
     private var mergeCandidates: [GearItem] {
         guard let current = item else { return [] }
@@ -194,6 +195,15 @@ struct GearEditorSheet: View {
                                             .font(.system(size: 12))
                                             .buttonStyle(.link)
                                         }
+                                        Button {
+                                            showAILogoFinder = true
+                                        } label: {
+                                            Label(L10n.t("AI 找图", "AI Find Logo"), systemImage: "sparkles")
+                                                .font(.system(size: 12))
+                                        }
+                                        .buttonStyle(.link)
+                                        .disabled(brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || BrandLogoCache.shouldSkipBrand(brand))
+
                                         Button(L10n.t("更换图标", "Custom Icon")) {
                                             pickCustomBrandIcon()
                                         }
@@ -500,6 +510,13 @@ struct GearEditorSheet: View {
         }
         .frame(width: 680, height: 760)
         .onAppear(perform: populate)
+        .sheet(isPresented: $showAILogoFinder) {
+            AILogoFinderSheet(
+                initialBrand: brand.trimmingCharacters(in: .whitespacesAndNewlines),
+                category: category
+            )
+            .environmentObject(store)
+        }
         .gearDeleteConfirmation(
             targetItem: $itemToDelete,
             onDeleted: { dismiss() },

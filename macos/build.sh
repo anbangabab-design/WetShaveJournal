@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="1.4.2"
-BUILD_NUM="20"
+VERSION="1.4.3"
+BUILD_NUM="21"
 APP_NAME="WetShaveJournal"
 APP_DISPLAY_NAME="湿剃日记"
 ARCH_TAG="arm64"
