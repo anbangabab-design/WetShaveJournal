@@ -191,7 +191,8 @@ struct JournalView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .padding(16)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 12)
 
                 Divider()
 
@@ -250,7 +251,7 @@ struct JournalView: View {
                                     }
                                 }
                             }
-                            .padding(14)
+                            .padding(10)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .onChange(of: scrollRequestToken) { _, _ in
@@ -264,7 +265,7 @@ struct JournalView: View {
                     }
                 }
             }
-            .frame(minWidth: 280, idealWidth: 320, maxWidth: 380, maxHeight: .infinity, alignment: .top)
+            .frame(minWidth: 220, idealWidth: 280, maxWidth: 360, maxHeight: .infinity, alignment: .top)
 
             // 右侧：SOTD 详情面板
             if let entry = activeEntry {
@@ -274,7 +275,7 @@ struct JournalView: View {
                     onEdit: { editingEntry = entry },
                     onDelete: { entryToDelete = entry }
                 )
-                .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             } else {
                 VStack(spacing: 16) {
                     Spacer(minLength: 0)
@@ -296,7 +297,7 @@ struct JournalView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -432,6 +433,8 @@ private struct EntryRowCard: View {
                 Text(entry.date)
                     .font(.system(size: 11.5, weight: .regular))
                     .foregroundStyle(isSelected ? ShaveTheme.accent.opacity(0.85) : .secondary.opacity(0.85))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 if entry.hasSyncConflict == true {
                     TagPill(text: L10n.t("同步冲突", "Conflict"), color: ShaveTheme.crimson)
                 } else if entry.suspectedDuplicate == true {
@@ -463,7 +466,7 @@ private struct EntryRowCard: View {
                 ) {
                     ForEach(gearSlots) { slot in
                         HStack(spacing: 6) {
-                            BrandAvatarView(brand: slot.brand, size: 17, category: slot.category)
+                            BrandAvatarView(brand: slot.brand, size: 23, maxWidth: 28, category: slot.category)
                             Text(slot.shortName)
                                 .font(.system(size: 12.5, weight: .medium))
                                 .foregroundStyle(.primary)
@@ -540,57 +543,82 @@ private struct EntryDetailPane: View {
         return list
     }
 
+    @ViewBuilder
+    private var detailActionButtons: some View {
+        HStack(spacing: 7) {
+            Button(action: onCopySOTD) {
+                Label(L10n.t("复制", "Copy"), systemImage: "doc.on.doc")
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .fixedSize()
+            .help(L10n.t("复制 SOTD", "Copy SOTD"))
+
+            Button(action: onEdit) {
+                Label(L10n.t("编辑", "Edit"), systemImage: "pencil")
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .fixedSize()
+            .disabled(store.isReadOnlyProtected)
+
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.bordered)
+            .fixedSize()
+            .disabled(store.isReadOnlyProtected)
+            .help(L10n.t("删除", "Delete"))
+        }
+    }
+
     var body: some View {
         let proc = store.parsedProcess(for: entry)
         let setupTiles = buildPairedSetupTiles()
-        let setupColumnCount = setupGridWidth >= 480 ? 2 : 1
+        let setupColumnCount = setupGridWidth >= 460 ? 2 : 1
         let setupColumns = Array(repeating: GridItem(.flexible(), spacing: 12), count: setupColumnCount)
 
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                // 顶部标题栏 + 复制 SOTD / 编辑 / 删除
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("SOTD · \(entry.date)")
-                            .font(.system(size: 26, weight: .bold, design: .rounded))
-                        FlowLayout(spacing: 6, lineSpacing: 6) {
-                            if let res = proc.result {
-                                TagPill(text: res.fullDescription, color: ShaveTheme.forest, filled: true)
-                            }
-                            if let irr = proc.irritation {
-                                TagPill(text: irr.displayName, color: ShaveTheme.irritationColor(irr))
-                            }
-                            if entry.hotTowel {
-                                TagPill(text: L10n.t("热敷", "Hot Towel"), neutral: true)
-                            }
-                            if entry.afterShower.hasPrefix("是") {
-                                TagPill(text: L10n.t("浴后", "Post-Shower"), neutral: true)
-                            }
-                            if entry.alum.hasPrefix("是") {
-                                TagPill(text: L10n.t("明矾", "Alum"), neutral: true)
-                            }
+            VStack(alignment: .leading, spacing: 20) {
+                // 顶部标题栏 + 紧凑复制 / 编辑 / 删除（窄屏自动换行，按钮绝不截断成 复...）
+                VStack(alignment: .leading, spacing: 10) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .center, spacing: 10) {
+                            Text("SOTD · \(entry.date)")
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
+                                .lineLimit(1)
+                                .fixedSize()
+                            Spacer(minLength: 8)
+                            detailActionButtons
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("SOTD · \(entry.date)")
+                                .font(.system(size: 23, weight: .bold, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.85)
+                            detailActionButtons
                         }
                     }
-                    Spacer()
-                    HStack(spacing: 8) {
-                        Button(action: onCopySOTD) {
-                            Label(L10n.t("复制 SOTD", "Copy SOTD"), systemImage: "doc.on.doc")
-                                .font(.system(size: 13.5, weight: .medium))
-                        }
-                        .buttonStyle(.bordered)
 
-                        Button(action: onEdit) {
-                            Label(L10n.t("编辑", "Edit"), systemImage: "pencil")
-                                .font(.system(size: 13.5, weight: .medium))
+                    FlowLayout(spacing: 6, lineSpacing: 6) {
+                        if let res = proc.result {
+                            TagPill(text: res.fullDescription, color: ShaveTheme.forest, filled: true)
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(store.isReadOnlyProtected)
-
-                        Button(role: .destructive, action: onDelete) {
-                            Image(systemName: "trash")
+                        if let irr = proc.irritation {
+                            TagPill(text: irr.displayName, color: ShaveTheme.irritationColor(irr))
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(store.isReadOnlyProtected)
+                        if entry.hotTowel {
+                            TagPill(text: L10n.t("热敷", "Hot Towel"), neutral: true)
+                        }
+                        if entry.afterShower.hasPrefix("是") {
+                            TagPill(text: L10n.t("浴后", "Post-Shower"), neutral: true)
+                        }
+                        if entry.alum.hasPrefix("是") {
+                            TagPill(text: L10n.t("明矾", "Alum"), neutral: true)
+                        }
                     }
                 }
 
@@ -691,7 +719,7 @@ private struct EntryDetailPane: View {
                     }
                 }
             }
-            .padding(28)
+            .padding(22)
         }
     }
 }
@@ -735,9 +763,9 @@ private struct GearMiniTile: View {
                     }
                 }
 
-                HStack(alignment: .center, spacing: 8) {
-                    BrandAvatarView(brand: ov.brand, size: 22, category: category)
-                    VStack(alignment: .leading, spacing: 1.5) {
+                HStack(alignment: .center, spacing: 10) {
+                    BrandAvatarView(brand: ov.brand, size: 35, maxWidth: 52, category: category, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 5) {
                             Text(L10n.brandDisplay(ov.brand))
                                 .font(.system(size: 12, weight: .medium))

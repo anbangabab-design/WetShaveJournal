@@ -11,7 +11,7 @@ struct WetShaveJournalApp: App {
                 .environmentObject(store)
                 .environmentObject(updateService)
                 .preferredColorScheme(store.appearanceMode.colorScheme)
-                .frame(minWidth: 1040, minHeight: 680)
+                .frame(minWidth: 560, minHeight: 500)
         }
         .windowToolbarStyle(.unified)
         .defaultSize(width: 1240, height: 800)

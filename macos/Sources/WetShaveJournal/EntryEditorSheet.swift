@@ -1167,7 +1167,7 @@ struct GearAutocompleteField: View {
                             onSelectItem?(item, inserted)
                         } label: {
                             HStack(spacing: 8) {
-                                BrandAvatarView(brand: item.brand, size: 19, category: category)
+                                BrandAvatarView(brand: item.brand, size: 22, maxWidth: 30, category: category)
                                 Text(L10n.brandDisplay(item.brand))
                                     .font(.system(size: 12.5, weight: .semibold))
                                     .foregroundStyle(.secondary)

@@ -5,11 +5,11 @@ import SwiftUI
 
 enum AppMetadata {
     static var version: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.1"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.2"
     }
 
     static var build: String {
-        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "19"
+        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "20"
     }
 }
 
@@ -55,7 +55,7 @@ enum AppearanceMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - OpenAI 兼容 AI 接口配置（API Key 仅存系统 Keychain，非敏感配置存 UserDefaults，绝不写入 journal.json）
+// MARK: - OpenAI 兼容 AI 接口配置（API Key 仅存本机私有加密文件，非敏感配置存 UserDefaults，绝不写入 journal.json、绝不随云盘同步）
 
 enum AIProviderPreset: String, CaseIterable, Identifiable {
     case deepseek = "DeepSeek"
@@ -135,10 +135,10 @@ struct AIConfig: Equatable {
         return true
     }
 
-    static func loadWithKeychainMigration(
+    static func loadWithLocalSecretMigration(
         defaults: UserDefaults = .standard,
-        keychainRead: () throws -> String? = { try KeychainStore.read() },
-        keychainSave: (String) throws -> Void = { try KeychainStore.save($0) }
+        secretRead: () throws -> String? = { try LocalSecretStore.read() },
+        secretSave: (String) throws -> Void = { try LocalSecretStore.save($0) }
     ) -> (config: AIConfig, warning: String?) {
         let preset = AIProviderPreset(rawValue: defaults.string(forKey: "WetShaveJournal.AI.Preset") ?? "") ?? .deepseek
         let baseURL = defaults.string(forKey: "WetShaveJournal.AI.BaseURL") ?? preset.defaultBaseURL
@@ -160,32 +160,32 @@ struct AIConfig: Equatable {
         var resolvedKey = ""
         var warning: String? = nil
 
-        var keychainKey: String? = nil
-        var keychainReadError: Error? = nil
+        var storedKey: String? = nil
+        var readError: Error? = nil
         do {
-            keychainKey = try keychainRead()
+            storedKey = try secretRead()
         } catch {
-            keychainReadError = error
+            readError = error
         }
 
         if !legacyKey.isEmpty {
-            if let existingKC = keychainKey?.trimmingCharacters(in: .whitespacesAndNewlines), !existingKC.isEmpty {
-                resolvedKey = existingKC
+            if let existing = storedKey?.trimmingCharacters(in: .whitespacesAndNewlines), !existing.isEmpty {
+                resolvedKey = existing
                 defaults.removeObject(forKey: legacyAPIKeyDefaultsKey)
             } else {
                 do {
-                    try keychainSave(legacyKey)
-                    let verified = try keychainRead()
+                    try secretSave(legacyKey)
+                    let verified = try secretRead()
                     guard verified == legacyKey else {
-                        throw KeychainStoreError.verificationMismatch
+                        throw LocalSecretStoreError.verificationMismatch
                     }
                     defaults.removeObject(forKey: legacyAPIKeyDefaultsKey)
                     resolvedKey = legacyKey
                 } catch {
                     resolvedKey = legacyKey
                     warning = L10n.t(
-                        "API Key 迁移至钥匙串失败（\(error.localizedDescription)），已临时保留旧配置以确保可用",
-                        "Failed to migrate API key to Keychain (\(error.localizedDescription)). Kept legacy value so AI remains usable."
+                        "API Key 迁移至本机私有凭据文件失败（\(error.localizedDescription)），已临时保留旧配置以确保可用",
+                        "Failed to migrate API key to local private storage (\(error.localizedDescription)). Kept legacy value so AI remains usable."
                     )
                 }
             }
@@ -193,12 +193,12 @@ struct AIConfig: Equatable {
             if legacyRaw != nil {
                 defaults.removeObject(forKey: legacyAPIKeyDefaultsKey)
             }
-            if let existingKC = keychainKey {
-                resolvedKey = existingKC
-            } else if let readErr = keychainReadError {
+            if let existing = storedKey {
+                resolvedKey = existing
+            } else if let readErr = readError {
                 warning = L10n.t(
-                    "读取钥匙串中的 API Key 失败：\(readErr.localizedDescription)",
-                    "Failed to read API key from Keychain: \(readErr.localizedDescription)"
+                    "读取本机私有凭据文件中的 API Key 失败：\(readErr.localizedDescription)",
+                    "Failed to read API key from local private storage: \(readErr.localizedDescription)"
                 )
             }
         }
@@ -215,6 +215,18 @@ struct AIConfig: Equatable {
         return (cfg, warning)
     }
 
+    static func loadWithKeychainMigration(
+        defaults: UserDefaults = .standard,
+        keychainRead: () throws -> String? = { try LocalSecretStore.read() },
+        keychainSave: (String) throws -> Void = { try LocalSecretStore.save($0) }
+    ) -> (config: AIConfig, warning: String?) {
+        loadWithLocalSecretMigration(
+            defaults: defaults,
+            secretRead: keychainRead,
+            secretSave: keychainSave
+        )
+    }
+
     func saveNonSensitiveToUserDefaults(defaults: UserDefaults = .standard) {
         defaults.set(enabled, forKey: "WetShaveJournal.AI.Enabled")
         defaults.set(preset.rawValue, forKey: "WetShaveJournal.AI.Preset")
@@ -224,9 +236,13 @@ struct AIConfig: Equatable {
         defaults.set(enableGoogleSearch, forKey: "WetShaveJournal.AI.EnableGoogleSearch")
     }
 
-    func saveAPIKeyToKeychain() throws {
-        try KeychainStore.save(apiKey)
+    func saveAPIKeyToLocalStore() throws {
+        try LocalSecretStore.save(apiKey)
         UserDefaults.standard.removeObject(forKey: Self.legacyAPIKeyDefaultsKey)
+    }
+
+    func saveAPIKeyToKeychain() throws {
+        try saveAPIKeyToLocalStore()
     }
 }
 

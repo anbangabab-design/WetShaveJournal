@@ -75,7 +75,7 @@ struct GearEditorSheet: View {
                 Button {
                     pickCustomBrandIcon()
                 } label: {
-                    BrandAvatarView(brand: headerBrandName, size: 52, category: category)
+                    BrandAvatarView(brand: headerBrandName, size: 52, maxWidth: 86, category: category)
                         .shadow(color: .black.opacity(scheme == .dark ? 0.25 : 0.08), radius: 5, y: 2)
                 }
                 .buttonStyle(.plain)

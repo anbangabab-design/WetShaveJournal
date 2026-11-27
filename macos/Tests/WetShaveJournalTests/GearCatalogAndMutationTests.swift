@@ -194,6 +194,170 @@ final class GearCatalogAndMutationTests: XCTestCase {
         XCTAssertNil(BrandLogoCache.resolveWhitelistedBrand("仿刀"))
         XCTAssertNil(BrandLogoCache.resolveWhitelistedBrand("未知手工小众牌"))
         XCTAssertNil(BrandLogoCache.resolveWhitelistedBrand("MyLocalArtisanSoap"))
+
+        // v1.4.2 全部 50+ 实测正确品牌、全部刀片与增量补齐品牌 100% 命中准确域名映射
+        let mustResolveBrands: [(String, String)] = [
+            ("Martin de Candre", "martin-de-candre.com"),
+            ("MdC", "martin-de-candre.com"),
+            ("Ethos Grooming", "ethosgroomingessentials.com"),
+            ("Ethos Grooming Essentials", "ethosgroomingessentials.com"),
+            ("Saponificio Varesino", "saponificiovaresino.com"),
+            ("SV", "saponificiovaresino.com"),
+            ("MacDuffs Soap Company", "macduffssoapcompany.com"),
+            ("MacDuff's Soap Company", "macduffssoapcompany.com"),
+            ("PantaRei", "pantareibrushes.it"),
+            ("Elysian Soap Shop", "elysiansoapshop.com"),
+            ("RazoRock", "italianbarber.com"),
+            ("RR", "italianbarber.com"),
+            ("HAGS", "haveagreatshave.com"),
+            ("HLS", "homelikeshaving.ru"),
+            ("HomeLikeShaving", "homelikeshaving.ru"),
+            ("Cella", "cellamilano.it"),
+            ("Fine Accoutrements", "fineaccoutrements.com"),
+            ("Gentleman's Nod", "gentlemansnod.com"),
+            ("NOD", "gentlemansnod.com"),
+            ("Le Père Lucien", "leperelucien.com"),
+            ("LPL", "leperelucien.com"),
+            ("Noble Otter", "nobleotter.com"),
+            ("Nomad Theory", "nomadtheory.co.uk"),
+            ("The Razor Company", "therazorcompany.com"),
+            ("TRC", "therazorcompany.com"),
+            ("Zingari Man", "zingariman.com"),
+            ("ZM", "zingariman.com"),
+            ("Frank Shaving", "frankshaving.com"),
+            ("FS", "frankshaving.com"),
+            ("Shavemac", "shavemac.com"),
+            ("Oumo", "oumoshavingbrush.com"),
+            ("Boti", "botibrush.com"),
+            ("Longshaving", "longshaving.com"),
+            ("Wald", "waldshaving.com"),
+            ("Simpson", "simpsonshavingbrushes.com"),
+            ("Maggard Razors", "maggardrazors.com"),
+            ("Omega", "omegabrush.com"),
+            ("Tatara", "tatararazors.com"),
+            ("Blutt", "bluttrasur.ch"),
+            ("Gillette", "gillette.com"),
+            ("Blackland", "blacklandrazors.com"),
+            ("Above The Tie", "abovethetie.com"),
+            ("ATT", "abovethetie.com"),
+            ("Atelier Durdan", "atelierdurdan.com"),
+            ("AD", "atelierdurdan.com"),
+            ("Rex Supply Co.", "rexsupplyco.com"),
+            ("Colonial", "colonialrazors.com"),
+            ("Alpha", "alphashaving.com"),
+            ("Maxwell June", "maxwelljune.com"),
+            ("MJ", "maxwelljune.com"),
+            ("Mühle", "muehle-shaving.com"),
+            ("Nord Razors", "nordrazors.com"),
+            ("Proraso", "proraso.com"),
+            ("Thayers", "thayers.com"),
+            ("Old Spice", "oldspice.com"),
+            ("Clubman Pinaud", "clubmanonline.com"),
+            ("CeraVe", "cerave.com"),
+            // 全部刀片
+            ("Personna", "personna.com"),
+            ("Feather", "feather.co.jp"),
+            ("Kai", "kai-group.com"),
+            ("Schick", "schick.com"),
+            ("Astra", "gillette.com"),
+            ("Wizamet", "gillette.com"),
+            ("Dorco", "dorcousa.com"),
+            // 增量补齐
+            ("Wolfman", "wolfmanrazors.com"),
+            ("Karve", "karveshaving.com"),
+            ("Stirling", "stirlingsoap.com"),
+            ("DG", "declarationgrooming.com"),
+            ("House of Mammoth", "houseofmammoth.com"),
+            ("PAA", "phoenixartisanaccoutrements.com"),
+            ("Moon Soaps", "moonsoaps.com"),
+            ("A&E", "aegrooming.com"),
+            ("C&H", "chiselandhound.com"),
+            ("Paladin", "paladinshaving.com"),
+            ("TNS", "turnnshave.com"),
+            ("Brad Sears", "bradsearsshaveworks.com"),
+            ("Yaqi", "yaqishaving.com"),
+            ("Aylsworth", "aylsworthrazors.com"),
+            ("Rocnel", "rocnel.com"),
+            ("Lambda", "lambdarazors.com"),
+            ("WestMan", "westmanshaving.com"),
+            ("Semogue", "portuguesefactory.com"),
+            ("The CaYuen Workshop", "cayuenworkshop.com")
+        ]
+        for (input, expectedDomain) in mustResolveBrands {
+            let hit = BrandLogoCache.resolveWhitelistedBrand(input)
+            XCTAssertEqual(hit?.domain, expectedDomain, "Expected \(input) -> \(expectedDomain)")
+        }
+
+        // 反 Etsy/平台黑名单保持拦截，同时放行品牌官网静态图 CDN (cdn.shopify.com)
+        XCTAssertTrue(BrandLogoCache.isBlacklistedHost("www.etsy.com"))
+        XCTAssertTrue(BrandLogoCache.isBlacklistedHost("i.etsystatic.com"))
+        XCTAssertTrue(BrandLogoCache.isBlacklistedHost("shopify.com"))
+        XCTAssertFalse(BrandLogoCache.isBlacklistedHost("cdn.shopify.com"))
+    }
+
+    func testBrandLogoPriorityOrderCustomOverBundledOverCacheAndClearKeepsBundled() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wsj_logo_prio_\(UUID().uuidString)", isDirectory: true)
+        let bundled = root.appendingPathComponent("BundledLogos", isDirectory: true)
+        let customDir = root.appendingPathComponent("CustomLogos", isDirectory: true)
+        let cacheDir = root.appendingPathComponent("LogoCache", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundled, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: customDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        func makeSolidPNG(size: Int, color: NSColor) -> Data {
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: size,
+                pixelsHigh: size,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            )!
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            color.setFill()
+            NSRect(x: 0, y: 0, width: size, height: size).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            return rep.representation(using: .png, properties: [:])!
+        }
+
+        // 写入 3 种不同尺寸的图片区分来源：Custom(48) > Bundled(36) > LogoCache(24)
+        try makeSolidPNG(size: 48, color: .systemRed).write(to: customDir.appendingPathComponent("blackland.png"))
+        try makeSolidPNG(size: 36, color: .systemGreen).write(to: bundled.appendingPathComponent("blackland.png"))
+        try makeSolidPNG(size: 36, color: .systemGreen).write(to: bundled.appendingPathComponent("gillette.png"))
+        try makeSolidPNG(size: 36, color: .systemGreen).write(to: bundled.appendingPathComponent("le_pere_lucien.png"))
+        try makeSolidPNG(size: 24, color: .systemBlue).write(to: cacheDir.appendingPathComponent("blackland.png"))
+        try makeSolidPNG(size: 24, color: .systemBlue).write(to: cacheDir.appendingPathComponent("wolfman.png"))
+
+        let logoCache = BrandLogoCache(appSupportRoot: root, bundledLogosDirectory: bundled)
+
+        // 1. CustomLogos/ 优先于 BrandLogos/ 与 LogoCache/
+        let blacklandImg = try XCTUnwrap(logoCache.logoImage(for: "Blackland"))
+        XCTAssertEqual(blacklandImg.representations.first?.pixelsWide, 48)
+
+        // 2. BrandLogos/ 支持重音品牌与域名共享品牌（Astra / Wizamet → gillette.png）离线秒开
+        let lplImg = try XCTUnwrap(logoCache.logoImage(for: "Le Père Lucien"))
+        XCTAssertEqual(lplImg.representations.first?.pixelsWide, 36)
+        let astraImg = try XCTUnwrap(logoCache.logoImage(for: "Astra"))
+        XCTAssertEqual(astraImg.representations.first?.pixelsWide, 36)
+        let wizametImg = try XCTUnwrap(logoCache.logoImage(for: "Wizamet"))
+        XCTAssertEqual(wizametImg.representations.first?.pixelsWide, 36)
+
+        // 3. LogoCache/ 作为第 3 级兜底
+        let wolfmanImg = try XCTUnwrap(logoCache.logoImage(for: "Wolfman"))
+        XCTAssertEqual(wolfmanImg.representations.first?.pixelsWide, 24)
+
+        // 4. 清理自动缓存后：LogoCache 被清空，CustomLogos 与内置 BrandLogos 完整保留
+        logoCache.clearAutoCacheAndRefetch()
+        XCTAssertEqual(logoCache.logoImage(for: "Blackland")?.representations.first?.pixelsWide, 48)
+        XCTAssertEqual(logoCache.logoImage(for: "Le Père Lucien")?.representations.first?.pixelsWide, 36)
+        XCTAssertNil(logoCache.logoImage(for: "Wolfman"))
     }
 
     func testAutocompleteCanonicalDisplayNameUnifiesWithLegacyAliasWithoutSplitting() throws {

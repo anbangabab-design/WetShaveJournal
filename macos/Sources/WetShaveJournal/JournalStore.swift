@@ -34,7 +34,7 @@ final class JournalStore: ObservableObject {
             aiConfig.saveNonSensitiveToUserDefaults()
             if aiConfig.apiKey != oldValue.apiKey {
                 do {
-                    try aiConfig.saveAPIKeyToKeychain()
+                    try aiConfig.saveAPIKeyToLocalStore()
                     keychainWarningMessage = nil
                 } catch {
                     keychainWarningMessage = error.localizedDescription
@@ -100,7 +100,7 @@ final class JournalStore: ObservableObject {
             }
 
             isBootstrappingAIConfig = true
-            let migrated = AIConfig.loadWithKeychainMigration()
+            let migrated = AIConfig.loadWithLocalSecretMigration()
             self.aiConfig = migrated.config
             self.keychainWarningMessage = migrated.warning
             migrationWarning = migrated.warning
@@ -171,17 +171,17 @@ final class JournalStore: ObservableObject {
         ProcessParser.parse(text)
     }
 
-    // MARK: - Keychain 与 Toast
+    // MARK: - 本机私有凭据存储与 Toast
 
     func clearAIAPIKey() {
         do {
-            try KeychainStore.delete()
+            try LocalSecretStore.delete()
             UserDefaults.standard.removeObject(forKey: AIConfig.legacyAPIKeyDefaultsKey)
             isBootstrappingAIConfig = true
             aiConfig.apiKey = ""
             isBootstrappingAIConfig = false
             keychainWarningMessage = nil
-            showToast(L10n.t("已从钥匙串清除 API Key", "Cleared API key from Keychain"), isLoading: false)
+            showToast(L10n.t("已清除本机保存的 API Key", "Cleared saved API key"), isLoading: false)
         } catch {
             keychainWarningMessage = error.localizedDescription
             showToast(error.localizedDescription, isLoading: false)

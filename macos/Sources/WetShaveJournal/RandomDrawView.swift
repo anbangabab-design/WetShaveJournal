@@ -525,7 +525,7 @@ private struct DrawSlotCard: View {
 
             if let item = item {
                 HStack(alignment: .center, spacing: 10) {
-                    BrandAvatarView(brand: item.brand, size: 30, category: category)
+                    BrandAvatarView(brand: item.brand, size: 35, maxWidth: 56, category: category, alignment: .leading)
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(L10n.brandDisplay(item.brand))

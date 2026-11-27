@@ -162,7 +162,7 @@ struct GearLibraryView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 152)
+                    .frame(width: 136)
 
                     Button {
                         showAIAuditSheet = true
@@ -202,7 +202,7 @@ struct GearLibraryView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .frame(width: 245)
+                    .frame(minWidth: 140, idealWidth: 210, maxWidth: 245)
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(ShaveTheme.cardBackground(scheme)))
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(ShaveTheme.cardBorder(scheme), lineWidth: 1))
 
@@ -395,8 +395,8 @@ struct GearLibraryView: View {
             } else if viewMode == .single {
                 ScrollView {
                     LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 295, maximum: 390), spacing: 16)],
-                        spacing: 16
+                        columns: [GridItem(.adaptive(minimum: 164, maximum: 188), spacing: 12)],
+                        spacing: 12
                     ) {
                         ForEach(filteredItems) { item in
                             GearCardView(item: item)
@@ -417,11 +417,11 @@ struct GearLibraryView: View {
                                 }
                         }
                     }
-                    .padding(24)
+                    .padding(20)
                 }
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 22) {
+                    LazyVStack(alignment: .leading, spacing: 20) {
                         ForEach(groupedByBrand) { group in
                             BrandSectionView(
                                 group: group,
@@ -432,7 +432,7 @@ struct GearLibraryView: View {
                             )
                         }
                     }
-                    .padding(24)
+                    .padding(20)
                 }
             }
         }
@@ -537,7 +537,7 @@ private struct BrandSectionView: View {
                 }
             } label: {
                 HStack(spacing: 11) {
-                    BrandAvatarView(brand: group.brand, size: 30, category: category)
+                    BrandAvatarView(brand: group.brand, size: 34, maxWidth: 56, category: category, alignment: .leading)
 
                     Text(L10n.brandDisplay(group.brand))
                         .font(.system(size: 17, weight: .bold))
@@ -557,8 +557,8 @@ private struct BrandSectionView: View {
 
             if isExpanded {
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 285, maximum: 385), spacing: 14)],
-                    spacing: 14
+                    columns: [GridItem(.adaptive(minimum: 160, maximum: 186), spacing: 12)],
+                    spacing: 12
                 ) {
                     ForEach(group.items) { item in
                         GearCardView(item: item)

@@ -1,6 +1,4 @@
-
 .DS_Store
-node_modules/
-dist/
-windows/src-tauri/target/
+.build/
+macos/.build/
 out-macos/

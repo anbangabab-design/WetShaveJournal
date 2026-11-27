@@ -1,97 +1,195 @@
 import Foundation
-import Security
+import CryptoKit
 
-// MARK: - macOS Keychain 轻量凭据存储（专用于 AI API Key，绝不在日志/错误中打印明文）
+// MARK: - 本机私有加密凭据存储（专用于 AI API Key，独立于云盘目录，绝不在日志/错误中打印明文）
+// 存储路径：~/Library/Application Support/WetShaveJournal_Secrets/ai_key.bin
+// 目录权限 0700、文件权限 0600，AES-256-GCM 封装；彻底避免 ad-hoc 签名更新后的 macOS 钥匙串密码弹窗。
 
+enum LocalSecretStoreError: LocalizedError {
+    case ioFailed(String)
+    case unexpectedData
+    case verificationMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .ioFailed(let msg):
+            return L10n.t("本机凭据文件读写失败：\(msg)", "Local credential storage error: \(msg)")
+        case .unexpectedData:
+            return L10n.t("本机凭据文件数据格式无效或已损坏", "Invalid or corrupted local credential data")
+        case .verificationMismatch:
+            return L10n.t("本机凭据文件回读校验不一致", "Local credential read-back verification failed")
+        }
+    }
+}
+
+/// 兼容旧调用的错误别名（不再依赖 macOS 钥匙串）
 enum KeychainStoreError: LocalizedError {
-    case osStatus(OSStatus)
+    case osStatus(Int32)
     case unexpectedData
     case verificationMismatch
 
     var errorDescription: String? {
         switch self {
         case .osStatus(let status):
-            let msg = (SecCopyErrorMessageString(status, nil) as String?) ?? "OSStatus \(status)"
-            return L10n.t("钥匙串操作失败：\(msg)", "Keychain error: \(msg)")
+            return L10n.t("凭据存储操作失败（错误码 \(status)）", "Credential store error (\(status))")
         case .unexpectedData:
-            return L10n.t("钥匙串中的凭据数据格式无效", "Invalid credential data in Keychain")
+            return LocalSecretStoreError.unexpectedData.errorDescription
         case .verificationMismatch:
-            return L10n.t("钥匙串回读校验不一致", "Keychain read-back verification failed")
+            return LocalSecretStoreError.verificationMismatch.errorDescription
         }
     }
 }
 
-enum KeychainStore {
-    static let service = "com.personal.wetshavejournal"
-    static let aiAPIKeyAccount = "ai_api_key"
+enum LocalSecretStore {
+    private static let secretsDirectoryName = "WetShaveJournal_Secrets"
+    private static let aiKeyFileName = "ai_key.bin"
+    private static let fileMagic: [UInt8] = [0x57, 0x53, 0x4A, 0x4B, 0x01] // "WSJK\x01"
+    private static let saltLength = 16
+    private static let appDomainPepper = "com.personal.wetshavejournal.local-secret.v1"
 
-    static func read(account: String = aiAPIKeyAccount) throws -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
+    /// 独立于云盘同步目录（不经由 JournalRepository.defaultAppSupportDirectory()）的本机私有凭据目录
+    static var defaultSecretsDirectoryURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return appSupport.appendingPathComponent(secretsDirectoryName, isDirectory: true)
+    }
+
+    static var defaultAIKeyFileURL: URL {
+        defaultSecretsDirectoryURL.appendingPathComponent(aiKeyFileName, isDirectory: false)
+    }
+
+    private static func deriveKey(salt: Data) -> SymmetricKey {
+        var material = Data(appDomainPepper.utf8)
+        material.append(0x00)
+        material.append(Data(NSUserName().utf8))
+        material.append(0x00)
+        material.append(salt)
+        let digest = SHA256.hash(data: material)
+        return SymmetricKey(data: digest)
+    }
+
+    private static func randomSalt(count: Int) -> Data {
+        var rng = SystemRandomNumberGenerator()
+        var bytes = [UInt8](repeating: 0, count: count)
+        for i in 0..<count {
+            bytes[i] = UInt8.random(in: 0...255, using: &rng)
+        }
+        return Data(bytes)
+    }
+
+    static func read(from fileURL: URL = defaultAIKeyFileURL) throws -> String? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: fileURL.path) else {
             return nil
         }
-        guard status == errSecSuccess else {
-            throw KeychainStoreError.osStatus(status)
+
+        let raw: Data
+        do {
+            raw = try Data(contentsOf: fileURL)
+        } catch {
+            throw LocalSecretStoreError.ioFailed(error.localizedDescription)
         }
-        guard let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
-            throw KeychainStoreError.unexpectedData
+
+        let headerLen = fileMagic.count + saltLength
+        // AES-GCM combined 最少需要 12B nonce + 16B tag = 28B
+        guard raw.count >= headerLen + 28 else {
+            throw LocalSecretStoreError.unexpectedData
         }
-        return value
+        let magicSlice = Array(raw.prefix(fileMagic.count))
+        guard magicSlice == fileMagic else {
+            throw LocalSecretStoreError.unexpectedData
+        }
+
+        let salt = raw.subdata(in: fileMagic.count..<headerLen)
+        let combined = raw.subdata(in: headerLen..<raw.count)
+        let key = deriveKey(salt: salt)
+
+        do {
+            let box = try AES.GCM.SealedBox(combined: combined)
+            let plaintext = try AES.GCM.open(box, using: key)
+            guard let value = String(data: plaintext, encoding: .utf8) else {
+                throw LocalSecretStoreError.unexpectedData
+            }
+            return value
+        } catch let storeErr as LocalSecretStoreError {
+            throw storeErr
+        } catch {
+            throw LocalSecretStoreError.unexpectedData
+        }
     }
 
-    static func save(_ secret: String, account: String = aiAPIKeyAccount) throws {
+    static func save(_ secret: String, to fileURL: URL = defaultAIKeyFileURL) throws {
         let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            try delete(account: account)
+            try delete(at: fileURL)
             return
         }
 
-        let encoded = Data(trimmed.utf8)
-        let matchQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let attributesToUpdate: [String: Any] = [
-            kSecValueData as String: encoded
-        ]
-
-        let updateStatus = SecItemUpdate(matchQuery as CFDictionary, attributesToUpdate as CFDictionary)
-        if updateStatus == errSecSuccess {
-            return
+        let fm = FileManager.default
+        let dir = fileURL.deletingLastPathComponent()
+        do {
+            try fm.createDirectory(
+                at: dir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        } catch {
+            throw LocalSecretStoreError.ioFailed(error.localizedDescription)
         }
 
-        if updateStatus == errSecItemNotFound {
-            var addQuery = matchQuery
-            addQuery[kSecValueData as String] = encoded
-            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw KeychainStoreError.osStatus(addStatus)
+        let salt = randomSalt(count: saltLength)
+        let key = deriveKey(salt: salt)
+        let payload: Data
+        do {
+            let sealed = try AES.GCM.seal(Data(trimmed.utf8), using: key)
+            guard let combined = sealed.combined else {
+                throw LocalSecretStoreError.unexpectedData
             }
-            return
+            var buffer = Data(fileMagic)
+            buffer.append(salt)
+            buffer.append(combined)
+            payload = buffer
+        } catch let storeErr as LocalSecretStoreError {
+            throw storeErr
+        } catch {
+            throw LocalSecretStoreError.ioFailed(error.localizedDescription)
         }
 
-        throw KeychainStoreError.osStatus(updateStatus)
+        let tmpURL = dir.appendingPathComponent(".\(fileURL.lastPathComponent).\(UUID().uuidString.prefix(10)).tmp")
+        do {
+            let fd = open(tmpURL.path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+            guard fd >= 0 else {
+                throw LocalSecretStoreError.ioFailed(String(cString: strerror(errno)))
+            }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            try handle.write(contentsOf: payload)
+            try handle.synchronize()
+            try handle.close()
+
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmpURL.path)
+            if rename(tmpURL.path, fileURL.path) != 0 {
+                let errStr = String(cString: strerror(errno))
+                try? fm.removeItem(at: tmpURL)
+                throw LocalSecretStoreError.ioFailed(errStr)
+            }
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        } catch let storeErr as LocalSecretStoreError {
+            try? fm.removeItem(at: tmpURL)
+            throw storeErr
+        } catch {
+            try? fm.removeItem(at: tmpURL)
+            throw LocalSecretStoreError.ioFailed(error.localizedDescription)
+        }
     }
 
-    static func delete(account: String = aiAPIKeyAccount) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainStoreError.osStatus(status)
+    static func delete(at fileURL: URL = defaultAIKeyFileURL) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: fileURL.path) else { return }
+        do {
+            try fm.removeItem(at: fileURL)
+        } catch {
+            throw LocalSecretStoreError.ioFailed(error.localizedDescription)
         }
     }
 
@@ -100,6 +198,25 @@ enum KeychainStore {
         let clean = secret.trimmingCharacters(in: .whitespacesAndNewlines)
         guard clean.count >= 6 else { return text }
         return text.replacingOccurrences(of: clean, with: "[REDACTED]")
+    }
+}
+
+/// 兼容桥接层：统一委托给本机私有加密文件（彻底停止访问系统钥匙串，消除密码弹窗）
+enum KeychainStore {
+    static func read() throws -> String? {
+        try LocalSecretStore.read()
+    }
+
+    static func save(_ secret: String) throws {
+        try LocalSecretStore.save(secret)
+    }
+
+    static func delete() throws {
+        try LocalSecretStore.delete()
+    }
+
+    static func redactSecret(_ secret: String, in text: String) -> String {
+        LocalSecretStore.redactSecret(secret, in: text)
     }
 }
 

@@ -1,13 +1,11 @@
 import SwiftUI
 import AppKit
 
-/// 品牌 Logo 检索与本地缓存服务（v1.4.1 白名单治本版）：
-/// 0) 用户自定义永久品牌图标（CustomLogos/，最高优先级，永不被清理或覆盖）
-/// 1) 品牌别名归一化 + 混搭名 `A × B` 主品牌提取 → 核实官方独立域名白名单
-///    严禁对未知品牌瞎猜 `<品牌>.com` 或盲搜第三方站点；不在白名单的小众/国内手工/仿刀默认展示干净首字圆形徽章
-/// 2) 白名单官网抓取链路：apple-touch-icon → 高清 icon → og:image → 页面头部 Logo；
-///    被 Cloudflare 拦截时自动回退至 Google Favicon 代理（sz=128）并过滤默认灰地球占位图
-/// 3) 清理并重抓时彻底清空旧 LogoCache/ 与 failed_cooldown.json（保留 CustomLogos/）
+/// 品牌 Logo 检索与多级缓存服务（v1.4.2 内置精选图包 + 高命中抓取版）：
+/// 0) `CustomLogos/`（用户手动上传永久图标，最高优先级，永不被清理或覆盖）
+/// 1) `BrandLogos/`（App 内置精选图包，离线秒开、永不退回字母圈）
+/// 2) `LogoCache/`（白名单官网自动抓取缓存：apple-touch-icon → 高清 icon → og:image → /favicon.ico → Google Favicon sz=128 稳定回退）
+/// 3) 无图/非白名单品牌平滑回退极简圆形首字母/首字徽章（严禁对未知品牌瞎猜 `<品牌>.com` 或抓取 Etsy 等平台站标）
 @MainActor
 final class BrandLogoCache: ObservableObject {
     static let shared = BrandLogoCache()
@@ -22,6 +20,7 @@ final class BrandLogoCache: ObservableObject {
     private struct PendingFetchRequest {
         let key: String
         let canonicalKey: String
+        let canonicalASCIIKey: String
         let brand: String
         let knownDomain: String
         let diskURL: URL
@@ -37,10 +36,18 @@ final class BrandLogoCache: ObservableObject {
     private var failedCooldowns: [String: TimeInterval] = [:]
 
     private let appSupportRoot: URL
-    private let cacheDirectory: URL      // 自动抓取缓存：LogoCache/
-    private let customDirectory: URL     // 用户手动上传：CustomLogos/
-    private let legacyDirectory: URL     // 旧版目录：BrandLogos/
-    private let cooldownFileURL: URL     // 失败冷却缓存：LogoCache/failed_cooldown.json
+    private let cacheDirectory: URL          // 自动抓取缓存：LogoCache/
+    private let customDirectory: URL         // 用户手动上传：CustomLogos/
+    private let legacyDirectory: URL         // 旧版用户目录：BrandLogos/
+    private let bundledLogosDirectory: URL?  // App 内置精选图包：.app/Contents/Resources/BrandLogos/
+    private let cooldownFileURL: URL         // 失败冷却缓存：LogoCache/failed_cooldown.json
+
+    // 同步索引与只读内存缓存（不触发 SwiftUI view-update 期间的 @Published 写入，确保首帧即秒开）
+    private var customIndex: [String: URL] = [:]
+    private var bundledIndex: [String: URL] = [:]
+    private var bundledDomainIndex: [String: URL] = [:]
+    private var localImageCache: [String: NSImage] = [:]
+    private var darkInvertCache: [ObjectIdentifier: Bool] = [:]
 
     private nonisolated static let sharedSession: URLSession = {
         let config = URLSessionConfiguration.default
@@ -53,7 +60,7 @@ final class BrandLogoCache: ObservableObject {
         return URLSession(configuration: config)
     }()
 
-    /// 严格禁止作为品牌 Logo 来源的平台域名黑名单
+    /// 严格禁止作为品牌 Logo 来源的平台域名黑名单（注意放行 Shopify 静态图 CDN `cdn.shopify.com`）
     nonisolated static let blacklistedDomains: [String] = [
         "etsy.com",
         "etsystatic.com",
@@ -78,19 +85,27 @@ final class BrandLogoCache: ObservableObject {
         "gstatic.com",
         "bing.com",
         "duckduckgo.com",
-        "shopify.com",
         "wixsite.com",
         "blogspot.",
         "wordpress.com"
     ]
 
-    /// 品牌中英文/简称/子线别名归一化表（小写精确与去符号匹配均支持）
+    /// 仅作为平台主站禁止、但不拦截其静态资源子域（如 cdn.shopify.com）的域名
+    nonisolated static let exactBlacklistedHosts: Set<String> = [
+        "shopify.com",
+        "www.shopify.com",
+        "apps.shopify.com",
+        "accounts.shopify.com"
+    ]
+
+    /// 品牌中英文/简称/子线别名归一化表（小写精确与去符号/去重音匹配均支持）
     nonisolated static let brandAliases: [String: String] = [
         "华研": "Terry's Soap",
         "华研手工皂": "Terry's Soap",
         "hwayeon": "Terry's Soap",
         "hwayeon soap": "Terry's Soap",
         "hwayeon soap co": "Terry's Soap",
+        "hwayeon soap co.": "Terry's Soap",
         "terrys soap": "Terry's Soap",
         "terry soap": "Terry's Soap",
         "terry's soap": "Terry's Soap",
@@ -155,46 +170,76 @@ final class BrandLogoCache: ObservableObject {
         "semogue owners club": "Semogue",
         "cayuen": "Cayuen",
         "cayuen workshop": "Cayuen",
+        "the cayuen workshop": "Cayuen",
         "att": "Above The Tie",
         "above the tie": "Above The Tie",
         "ad": "Atelier Durdan",
         "atelier durdan": "Atelier Durdan",
         "alpha": "Alpha",
         "alpha shaving": "Alpha",
+        "alpha shaving works": "Alpha",
+        "astra": "Astra",
+        "astra sp": "Astra",
+        "astra blue": "Astra",
+        "astra green": "Astra",
         "b&m": "Barrister and Mann",
         "barrister & mann": "Barrister and Mann",
         "barrister and mann": "Barrister and Mann",
         "blackland": "Blackland",
         "blackland razors": "Blackland",
         "黑鸟": "Blackland",
+        "blutt": "Blutt",
+        "blutt rasur": "Blutt",
+        "cella": "Cella",
+        "cella milano": "Cella",
+        "clubman": "Clubman Pinaud",
+        "pinaud": "Clubman Pinaud",
+        "clubman pinaud": "Clubman Pinaud",
         "colonial": "Colonial",
         "colonial razors": "Colonial",
+        "dorco": "Dorco",
+        "doroc": "Dorco",
+        "elysian": "Elysian Soap Shop",
+        "elysian soap shop": "Elysian Soap Shop",
         "ethos": "Ethos Grooming",
         "ethos grooming": "Ethos Grooming",
+        "ethos grooming essentials": "Ethos Grooming",
         "fine": "Fine Accoutrements",
         "fine accoutrements": "Fine Accoutrements",
         "fs": "Frank Shaving",
         "frank shaving": "Frank Shaving",
         "feather": "Feather",
         "羽毛": "Feather",
+        "nod": "Gentleman's Nod",
+        "gentlemans nod": "Gentleman's Nod",
+        "gentleman's nod": "Gentleman's Nod",
         "gillette": "Gillette",
         "吉列": "Gillette",
+        "hags": "HAGS",
+        "have a great shave": "HAGS",
         "henson": "Henson",
         "henson shaving": "Henson",
         "hls": "HLS",
         "homelike": "HLS",
+        "homelikeshaving": "HLS",
         "homelike shaving": "HLS",
         "kai": "Kai",
         "贝印": "Kai",
         "lpl": "Le Père Lucien",
         "le pere lucien": "Le Père Lucien",
+        "le père lucien": "Le Père Lucien",
         "macduff": "MacDuffs Soap Company",
         "macduffs": "MacDuffs Soap Company",
+        "macduff's soap company": "MacDuffs Soap Company",
+        "macduffs soap company": "MacDuffs Soap Company",
         "maggard": "Maggard",
         "maggard razors": "Maggard",
         "mdc": "Martin de Candre",
         "martin de candre": "Martin de Candre",
+        "mj": "Maxwell June",
+        "maxwell june": "Maxwell June",
         "muhle": "Mühle",
+        "muehle": "Mühle",
         "mühle": "Mühle",
         "穆乐": "Mühle",
         "merkur": "Merkur",
@@ -202,6 +247,10 @@ final class BrandLogoCache: ObservableObject {
         "mwf": "Mitchell's Wool Fat",
         "noble otter": "Noble Otter",
         "水獭": "Noble Otter",
+        "nord": "Nord Razors",
+        "nord razors": "Nord Razors",
+        "nord shaving": "Nord Razors",
+        "nordic shaving": "Nordic Shaving Company",
         "oumo": "Oumo",
         "欧慕": "Oumo",
         "boti": "Boti",
@@ -214,12 +263,14 @@ final class BrandLogoCache: ObservableObject {
         "rex": "Rex Supply Co.",
         "rex supply": "Rex Supply Co.",
         "rex supply co": "Rex Supply Co.",
+        "rex supply co.": "Rex Supply Co.",
         "sv": "Saponificio Varesino",
         "sv1945": "Saponificio Varesino",
         "saponificio varesino": "Saponificio Varesino",
         "schick": "Schick",
         "舒适": "Schick",
         "simpson": "Simpson",
+        "simpsons": "Simpson",
         "辛普森": "Simpson",
         "tatara": "Tatara",
         "tatara razors": "Tatara",
@@ -230,7 +281,15 @@ final class BrandLogoCache: ObservableObject {
         "津尔氏": "Thayers",
         "timeless": "Timeless",
         "timeless razor": "Timeless",
+        "wald": "Wald",
+        "wald shaving": "Wald",
         "wilkinson": "Wilkinson Sword",
+        "wizamet": "Wizamet",
+        "wizamet super iridium": "Wizamet",
+        "super iridium": "Wizamet",
+        "iridium super": "Wizamet",
+        "polsilver": "Wizamet",
+        "zm": "Zingari Man",
         "zingari": "Zingari Man",
         "zingari man": "Zingari Man",
         "ej": "Edwin Jagger",
@@ -243,7 +302,7 @@ final class BrandLogoCache: ObservableObject {
         "ap shave co": "AP Shave Co"
     ]
 
-    /// 经核实的湿剃品牌官方独立域名白名单（严禁在此表外盲猜 .com）
+    /// 经核实的湿剃品牌官方独立域名白名单（覆盖全部 50+ 实测品牌、全部刀片与增量补齐品牌；严禁在此表外盲猜 .com）
     nonisolated static let brandDomains: [String: String] = [
         "Above The Tie": "abovethetie.com",
         "Acqua di Parma": "acquadiparma.com",
@@ -254,6 +313,7 @@ final class BrandLogoCache: ObservableObject {
         "Arko": "arkomen.com",
         "Arno": "arnobrush.com",
         "Ascender": "ascenderrazors.com",
+        "Astra": "gillette.com",
         "Atelier Durdan": "atelierdurdan.com",
         "Aylsworth": "aylsworthrazors.com",
         "Barrister and Mann": "barristerandmann.com",
@@ -286,6 +346,7 @@ final class BrandLogoCache: ObservableObject {
         "Feather": "feather.co.jp",
         "Fine Accoutrements": "fineaccoutrements.com",
         "Frank Shaving": "frankshaving.com",
+        "Gentleman's Nod": "gentlemansnod.com",
         "Geo. F. Trumper": "trumpers.com",
         "Gillette": "gillette.com",
         "Grooming Dept": "groomingdept.com",
@@ -313,6 +374,8 @@ final class BrandLogoCache: ObservableObject {
         "Nivea": "nivea.com",
         "Noble Otter": "nobleotter.com",
         "Nomad Theory": "nomadtheory.co.uk",
+        "Nord Razors": "nordrazors.com",
+        "Nordic Shaving Company": "nordicshaving.com",
         "Old Spice": "oldspice.com",
         "Omega": "omegabrush.com",
         "Osma": "osma-tradition.com",
@@ -352,6 +415,7 @@ final class BrandLogoCache: ObservableObject {
         "Wholly Kaw": "whollykaw.com",
         "Wickham": "w-soap.co.uk",
         "Wilkinson Sword": "wilkinsonsword.com",
+        "Wizamet": "gillette.com",
         "Wolfman": "wolfmanrazors.com",
         "Yaqi": "yaqishaving.com",
         "Yates": "yatesprecision.com",
@@ -374,7 +438,7 @@ final class BrandLogoCache: ObservableObject {
 
     private nonisolated static func compactAlnum(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
             .unicodeScalars
             .filter { CharacterSet.alphanumerics.contains($0) }
             .map(String.init)
@@ -429,17 +493,71 @@ final class BrandLogoCache: ObservableObject {
         return nil
     }
 
-    private init() {
-        self.appSupportRoot = JournalRepository.defaultAppSupportDirectory()
+    private convenience init() {
+        let bundleDir = Bundle.main.resourceURL?.appendingPathComponent("BrandLogos", isDirectory: true)
+        self.init(
+            appSupportRoot: JournalRepository.defaultAppSupportDirectory(),
+            bundledLogosDirectory: bundleDir
+        )
+    }
+
+    init(appSupportRoot: URL, bundledLogosDirectory: URL?) {
+        self.appSupportRoot = appSupportRoot
         self.cacheDirectory = appSupportRoot.appendingPathComponent("LogoCache", isDirectory: true)
         self.customDirectory = appSupportRoot.appendingPathComponent("CustomLogos", isDirectory: true)
         self.legacyDirectory = appSupportRoot.appendingPathComponent("BrandLogos", isDirectory: true)
+        self.bundledLogosDirectory = bundledLogosDirectory
         self.cooldownFileURL = cacheDirectory.appendingPathComponent("failed_cooldown.json")
         if FileManager.default.fileExists(atPath: appSupportRoot.path) || !appSupportRoot.path.contains("/Library/CloudStorage/") {
             try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
             try? FileManager.default.createDirectory(at: customDirectory, withIntermediateDirectories: true)
         }
+        rebuildCustomIndex()
+        rebuildBundledIndex()
         loadFailedCooldowns()
+    }
+
+    private func rebuildCustomIndex() {
+        var idx: [String: URL] = [:]
+        if let files = try? FileManager.default.contentsOfDirectory(at: customDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            for f in files {
+                let ext = f.pathExtension.lowercased()
+                guard Self.supportedImageExtensions.contains(ext) else { continue }
+                let rawStem = f.deletingPathExtension().lastPathComponent
+                let key = rawStem.precomposedStringWithCanonicalMapping.lowercased()
+                let ascii = Self.asciiBrandKey(rawStem)
+                if !key.isEmpty { idx[key] = f }
+                if !ascii.isEmpty { idx[ascii] = f }
+            }
+        }
+        customIndex = idx
+    }
+
+    private func rebuildBundledIndex() {
+        var idx: [String: URL] = [:]
+        var domIdx: [String: URL] = [:]
+        if let dir = bundledLogosDirectory,
+           let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            for f in files {
+                let ext = f.pathExtension.lowercased()
+                guard Self.supportedImageExtensions.contains(ext) else { continue }
+                let rawStem = f.deletingPathExtension().lastPathComponent
+                let key = rawStem.precomposedStringWithCanonicalMapping.lowercased()
+                let ascii = Self.asciiBrandKey(rawStem)
+                if !key.isEmpty { idx[key] = f }
+                if !ascii.isEmpty { idx[ascii] = f }
+            }
+        }
+        // 建立 域名 → 内置精选图包 URL 索引（供 Astra / Wizamet 等同属 Gillette 的品牌离线直达）
+        for (brandName, domain) in Self.brandDomains {
+            let k1 = Self.normalizedBrandKey(brandName)
+            let k2 = Self.asciiBrandKey(brandName)
+            if let hit = idx[k1] ?? idx[k2] {
+                domIdx[domain.lowercased()] = domIdx[domain.lowercased()] ?? hit
+            }
+        }
+        bundledIndex = idx
+        bundledDomainIndex = domIdx
     }
 
     private func loadFailedCooldowns() {
@@ -481,18 +599,160 @@ final class BrandLogoCache: ObservableObject {
         saveFailedCooldowns()
     }
 
-    func logoImage(for brand: String) -> NSImage? {
-        let key = normalizedBrandKey(brand)
-        if let exact = images[key] {
-            return exact
+    private func candidateKeys(for brand: String) -> (keys: [String], resolved: (canonical: String, domain: String)?) {
+        let trimmed = brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawKey = Self.normalizedBrandKey(trimmed)
+        let rawASCII = Self.asciiBrandKey(trimmed)
+        let resolved = Self.resolveWhitelistedBrand(trimmed)
+
+        var keys: [String] = []
+        func appendUnique(_ k: String) {
+            if !k.isEmpty && !keys.contains(k) {
+                keys.append(k)
+            }
         }
-        if let resolved = Self.resolveWhitelistedBrand(brand) {
-            let canonKey = normalizedBrandKey(resolved.canonical)
-            if let hit = images[canonKey] {
+        appendUnique(rawKey)
+        appendUnique(rawASCII)
+        if let res = resolved {
+            appendUnique(Self.normalizedBrandKey(res.canonical))
+            appendUnique(Self.asciiBrandKey(res.canonical))
+        }
+        return (keys, resolved)
+    }
+
+    private func loadLocalFileImage(at url: URL) -> NSImage? {
+        let cacheKey = url.standardizedFileURL.path
+        if let cached = localImageCache[cacheKey] {
+            return cached
+        }
+        guard let data = try? Data(contentsOf: url),
+              let img = NSImage(data: data) else {
+            return nil
+        }
+        localImageCache[cacheKey] = img
+        return img
+    }
+
+    private func resolveCustomLogoURL(for keys: [String]) -> URL? {
+        for k in keys {
+            if let hit = customIndex[k], FileManager.default.fileExists(atPath: hit.path) {
                 return hit
             }
         }
         return nil
+    }
+
+    private func resolveBundledLogoURL(for keys: [String], domain: String?) -> URL? {
+        for k in keys {
+            if let hit = bundledIndex[k], FileManager.default.fileExists(atPath: hit.path) {
+                return hit
+            }
+        }
+        if let dom = domain?.lowercased(),
+           let hit = bundledDomainIndex[dom],
+           FileManager.default.fileExists(atPath: hit.path) {
+            return hit
+        }
+        return nil
+    }
+
+    private func resolveDiskCacheLogoURL(for keys: [String]) -> URL? {
+        for k in keys {
+            let candidate = cacheDirectory.appendingPathComponent("\(k).png")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// 统一 Logo 读取优先级：CustomLogos/ > BrandLogos/（内置精选图包） > LogoCache/（联网缓存） > nil（字母兜底）
+    func logoImage(for brand: String) -> NSImage? {
+        let trimmed = brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !Self.shouldSkipBrand(trimmed) else { return nil }
+
+        let (keys, resolved) = candidateKeys(for: trimmed)
+
+        // Tier 0: 用户手动上传的永久图标（CustomLogos/）
+        if let customURL = resolveCustomLogoURL(for: keys),
+           let img = loadLocalFileImage(at: customURL) {
+            return img
+        }
+
+        // Tier 1: App 内置精选图包（BrandLogos/，离线秒开）
+        if let bundledURL = resolveBundledLogoURL(for: keys, domain: resolved?.domain),
+           let img = loadLocalFileImage(at: bundledURL) {
+            return img
+        }
+
+        // Tier 2: 已加载至内存的联网缓存（LogoCache/）
+        for k in keys {
+            if let hit = images[k] {
+                return hit
+            }
+        }
+
+        // 同步兜底读取已存在的磁盘 LogoCache/，避免切换视图或列表滚动时闪回字母圈
+        if let cachedURL = resolveDiskCacheLogoURL(for: keys),
+           let img = loadLocalFileImage(at: cachedURL),
+           Self.isValidIcon(img, minDimension: 16) {
+            return img
+        }
+
+        return nil
+    }
+
+    /// 检测深色模式下是否需要反相（仅针对透明底纯黑/深灰单色字标与线条徽章，彩标与实底标绝不反转）
+    func shouldInvertInDarkMode(image: NSImage) -> Bool {
+        let oid = ObjectIdentifier(image)
+        if let cached = darkInvertCache[oid] {
+            return cached
+        }
+        let result = Self.computeIsDarkTransparentMonochrome(image)
+        darkInvertCache[oid] = result
+        return result
+    }
+
+    private nonisolated static func computeIsDarkTransparentMonochrome(_ img: NSImage) -> Bool {
+        guard let tiff = img.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else {
+            return false
+        }
+        let w = rep.pixelsWide
+        let h = rep.pixelsHigh
+        guard w > 0, h > 0 else { return false }
+
+        let stepX = max(1, w / 24)
+        let stepY = max(1, h / 24)
+        var transparentCount = 0
+        var opaqueCount = 0
+        var darkNeutralCount = 0
+
+        for y in stride(from: 0, to: h, by: stepY) {
+            for x in stride(from: 0, to: w, by: stepX) {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if c.alphaComponent < 0.12 {
+                    transparentCount += 1
+                } else {
+                    opaqueCount += 1
+                    let lum = 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent
+                    let chroma = max(
+                        abs(c.redComponent - c.greenComponent),
+                        abs(c.greenComponent - c.blueComponent),
+                        abs(c.redComponent - c.blueComponent)
+                    )
+                    if lum < 0.30 && chroma < 0.12 {
+                        darkNeutralCount += 1
+                    }
+                }
+            }
+        }
+
+        let total = transparentCount + opaqueCount
+        guard total > 0, opaqueCount > 0 else { return false }
+        let transparentRatio = Double(transparentCount) / Double(total)
+        let darkNeutralRatio = Double(darkNeutralCount) / Double(opaqueCount)
+        return transparentRatio >= 0.10 && darkNeutralRatio >= 0.85
     }
 
     /// 用户手动选择本地图片设为该品牌的永久 Logo
@@ -505,18 +765,26 @@ final class BrandLogoCache: ObservableObject {
               let png = rep.representation(using: .png, properties: [:]) else {
             return false
         }
-        let key = normalizedBrandKey(trimmed)
+        let key = Self.asciiBrandKey(trimmed)
+        let rawKey = Self.normalizedBrandKey(trimmed)
         let dst = customDirectory.appendingPathComponent("\(key).png")
         do {
             try FileManager.default.createDirectory(at: customDirectory, withIntermediateDirectories: true)
             if let existing = try? FileManager.default.contentsOfDirectory(at: customDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-                for file in existing where file.deletingPathExtension().lastPathComponent.lowercased() == key && file.standardizedFileURL != dst.standardizedFileURL {
-                    try? FileManager.default.removeItem(at: file)
+                for file in existing {
+                    let stem = Self.asciiBrandKey(file.deletingPathExtension().lastPathComponent)
+                    if stem == key && file.standardizedFileURL != dst.standardizedFileURL {
+                        try? FileManager.default.removeItem(at: file)
+                    }
                 }
             }
             try JournalRepository.atomicWriteData(png, to: dst)
+            localImageCache.removeValue(forKey: dst.standardizedFileURL.path)
+            rebuildCustomIndex()
             images[key] = img
+            if rawKey != key { images[rawKey] = img }
             failedCooldowns.removeValue(forKey: "brand:\(key)")
+            failedCooldowns.removeValue(forKey: "brand:\(rawKey)")
             saveFailedCooldowns()
             cacheRevision += 1
             NotificationCenter.default.post(name: Self.customLogoDidChangeNotification, object: key)
@@ -526,48 +794,20 @@ final class BrandLogoCache: ObservableObject {
         }
     }
 
-    /// 重新扫描 CustomLogos/ 目录（供云盘双端同步拉取新图标后即时刷新 UI）
+    /// 重新扫描 CustomLogos/ 目录（供云盘同步拉取新图标后即时刷新 UI）
     func reloadCustomLogos() {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: customDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
-            return
-        }
-        var didUpdate = false
-        for f in files {
-            let ext = f.pathExtension.lowercased()
-            guard Self.supportedImageExtensions.contains(ext) else { continue }
-            let key = f.deletingPathExtension().lastPathComponent.lowercased()
-            guard !key.isEmpty else { continue }
-            if let data = try? Data(contentsOf: f), let img = NSImage(data: data) {
+        localImageCache.removeAll()
+        rebuildCustomIndex()
+        for (key, url) in customIndex {
+            if let img = loadLocalFileImage(at: url) {
                 images[key] = img
                 failedCooldowns.removeValue(forKey: "brand:\(key)")
-                didUpdate = true
             }
         }
-        if didUpdate {
-            cacheRevision += 1
-        }
+        cacheRevision += 1
     }
 
-    private func findCustomLogoFile(forKey key: String) -> URL? {
-        let pngURL = customDirectory.appendingPathComponent("\(key).png")
-        if FileManager.default.fileExists(atPath: pngURL.path) {
-            return pngURL
-        }
-        guard let files = try? FileManager.default.contentsOfDirectory(at: customDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
-            return nil
-        }
-        for file in files {
-            let ext = file.pathExtension.lowercased()
-            guard Self.supportedImageExtensions.contains(ext) else { continue }
-            if file.deletingPathExtension().lastPathComponent.lowercased() == key {
-                return file
-            }
-        }
-        return nil
-    }
-
-    /// 彻底清理自动抓取缓存（LogoCache/、failed_cooldown.json 与旧版 BrandLogos/），完整保留 CustomLogos/
+    /// 彻底清理自动抓取缓存（LogoCache/、failed_cooldown.json 与旧版用户 BrandLogos/），完整保留 CustomLogos/ 与 App 内置精选图包
     func clearAutoCacheAndRefetch() {
         try? FileManager.default.removeItem(at: cooldownFileURL)
         try? FileManager.default.removeItem(at: cacheDirectory)
@@ -580,17 +820,11 @@ final class BrandLogoCache: ObservableObject {
         queuedKeys.removeAll()
         pendingQueue.removeAll()
         failedCooldowns.removeAll()
+        localImageCache.removeAll()
+        darkInvertCache.removeAll()
+        images.removeAll()
 
-        var retained: [String: NSImage] = [:]
-        if let files = try? FileManager.default.contentsOfDirectory(at: customDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-            for f in files where Self.supportedImageExtensions.contains(f.pathExtension.lowercased()) {
-                let key = f.deletingPathExtension().lastPathComponent.lowercased()
-                if let data = try? Data(contentsOf: f), let img = NSImage(data: data) {
-                    retained[key] = img
-                }
-            }
-        }
-        images = retained
+        rebuildCustomIndex()
         cacheRevision += 1
     }
 
@@ -598,49 +832,40 @@ final class BrandLogoCache: ObservableObject {
         let trimmed = brand.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !Self.shouldSkipBrand(trimmed) else { return }
 
-        let key = normalizedBrandKey(trimmed)
-        let resolved = Self.resolveWhitelistedBrand(trimmed)
-        let canonicalKey = resolved.map { normalizedBrandKey($0.canonical) } ?? key
+        let (keys, resolved) = candidateKeys(for: trimmed)
 
-        if images[key] != nil || images[canonicalKey] != nil { return }
-        if inFlight.contains(key) || queuedKeys.contains(key) || inFlight.contains(canonicalKey) || queuedKeys.contains(canonicalKey) {
-            return
-        }
-
-        // Tier 0: 优先加载用户自定义永久图标（依次检查原始 key 与规范别名 key）
-        for customKey in [key, canonicalKey] {
-            if let customURL = findCustomLogoFile(forKey: customKey),
-               let data = try? Data(contentsOf: customURL),
-               let img = NSImage(data: data) {
-                images[key] = img
-                if canonicalKey != key { images[canonicalKey] = img }
-                return
-            }
-        }
+        // Tier 0 (CustomLogos/) 与 Tier 1 (App 内置 BrandLogos/) 直接离线命中，无需联网
+        if resolveCustomLogoURL(for: keys) != nil { return }
+        if resolveBundledLogoURL(for: keys, domain: resolved?.domain) != nil { return }
 
         // 不在核实官网白名单的品牌严禁瞎猜域名，直接走干净首字圆形徽章
         guard let whitelisted = resolved else { return }
 
-        // 检查本地自动缓存 LogoCache/（兼容原 key 与规范别名 key）
-        for cacheKey in [key, canonicalKey] {
-            let cachedURL = cacheDirectory.appendingPathComponent("\(cacheKey).png")
-            if FileManager.default.fileExists(atPath: cachedURL.path),
-               let data = try? Data(contentsOf: cachedURL),
-               let img = NSImage(data: data),
-               Self.isValidIcon(img, minDimension: 24) {
-                images[key] = img
-                if canonicalKey != key { images[canonicalKey] = img }
-                return
-            }
+        let key = Self.normalizedBrandKey(trimmed)
+        let canonicalKey = Self.normalizedBrandKey(whitelisted.canonical)
+        let canonicalASCIIKey = Self.asciiBrandKey(whitelisted.canonical)
+
+        if keys.contains(where: { images[$0] != nil }) { return }
+        if inFlight.contains(canonicalASCIIKey) || queuedKeys.contains(canonicalASCIIKey) {
+            return
         }
 
-        if isInCooldown(brandKey: canonicalKey, domain: whitelisted.domain) { return }
+        // Tier 2: 检查本地联网缓存 LogoCache/
+        if let cachedURL = resolveDiskCacheLogoURL(for: keys),
+           let img = loadLocalFileImage(at: cachedURL),
+           Self.isValidIcon(img, minDimension: 16) {
+            for k in keys { images[k] = img }
+            return
+        }
 
-        let diskURL = cacheDirectory.appendingPathComponent("\(canonicalKey).png")
-        queuedKeys.insert(canonicalKey)
+        if isInCooldown(brandKey: canonicalASCIIKey, domain: whitelisted.domain) { return }
+
+        let diskURL = cacheDirectory.appendingPathComponent("\(canonicalASCIIKey).png")
+        queuedKeys.insert(canonicalASCIIKey)
         pendingQueue.append(PendingFetchRequest(
             key: key,
             canonicalKey: canonicalKey,
+            canonicalASCIIKey: canonicalASCIIKey,
             brand: whitelisted.canonical,
             knownDomain: whitelisted.domain,
             diskURL: diskURL
@@ -651,14 +876,14 @@ final class BrandLogoCache: ObservableObject {
     private func pumpFetchQueue() {
         while activeFetchCount < maxConcurrentFetches, !pendingQueue.isEmpty {
             let req = pendingQueue.removeFirst()
-            queuedKeys.remove(req.canonicalKey)
-            guard images[req.canonicalKey] == nil,
-                  !inFlight.contains(req.canonicalKey),
-                  !isInCooldown(brandKey: req.canonicalKey, domain: req.knownDomain) else {
+            queuedKeys.remove(req.canonicalASCIIKey)
+            guard images[req.canonicalASCIIKey] == nil,
+                  !inFlight.contains(req.canonicalASCIIKey),
+                  !isInCooldown(brandKey: req.canonicalASCIIKey, domain: req.knownDomain) else {
                 continue
             }
 
-            inFlight.insert(req.canonicalKey)
+            inFlight.insert(req.canonicalASCIIKey)
             activeFetchCount += 1
             let generation = fetchGeneration
 
@@ -666,16 +891,19 @@ final class BrandLogoCache: ObservableObject {
                 let data = await Self.fetchWhitelistedDomainIcon(domain: req.knownDomain, session: Self.sharedSession)
                 await MainActor.run {
                     guard self.fetchGeneration == generation else { return }
-                    self.inFlight.remove(req.canonicalKey)
+                    self.inFlight.remove(req.canonicalASCIIKey)
                     self.activeFetchCount = max(0, self.activeFetchCount - 1)
 
-                    if let data = data, let img = NSImage(data: data), Self.isValidIcon(img, minDimension: 24) {
+                    if let data = data, let img = NSImage(data: data), Self.isValidIcon(img, minDimension: 16) {
                         try? FileManager.default.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
                         try? data.write(to: req.diskURL, options: .atomic)
+                        self.localImageCache[req.diskURL.standardizedFileURL.path] = img
+                        self.images[req.canonicalASCIIKey] = img
                         self.images[req.canonicalKey] = img
                         self.images[req.key] = img
+                        self.cacheRevision += 1
                     } else {
-                        self.markFailedCooldown(brandKey: req.canonicalKey, domain: req.knownDomain)
+                        self.markFailedCooldown(brandKey: req.canonicalASCIIKey, domain: req.knownDomain)
                     }
                     self.pumpFetchQueue()
                 }
@@ -683,17 +911,34 @@ final class BrandLogoCache: ObservableObject {
         }
     }
 
-    private func normalizedBrandKey(_ brand: String) -> String {
+    nonisolated static func normalizedBrandKey(_ brand: String) -> String {
         let allowed = CharacterSet.alphanumerics
         return brand.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
             .lowercased()
             .unicodeScalars
             .map { allowed.contains($0) ? String($0) : "_" }
             .joined()
     }
 
-    private nonisolated static func isBlacklistedHost(_ host: String) -> Bool {
+    nonisolated static func asciiBrandKey(_ brand: String) -> String {
+        let allowed = CharacterSet.alphanumerics
+        return brand.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .unicodeScalars
+            .map { allowed.contains($0) ? String($0) : "_" }
+            .joined()
+    }
+
+    nonisolated static func isBlacklistedHost(_ host: String) -> Bool {
         let h = host.lowercased()
+        if exactBlacklistedHosts.contains(h) {
+            return true
+        }
+        // Shopify 官方静态图 CDN（cdn.shopify.com）承载众多独立湿剃品牌官网图标，明确放行
+        if h == "cdn.shopify.com" || h.hasSuffix(".shopifycdn.com") {
+            return false
+        }
         for bad in blacklistedDomains {
             if bad.hasSuffix(".") {
                 if h.contains(bad) { return true }
@@ -704,114 +949,64 @@ final class BrandLogoCache: ObservableObject {
         return false
     }
 
-    private nonisolated static func isValidIcon(_ img: NSImage, minDimension: Int = 24) -> Bool {
+    private nonisolated static func isValidIcon(_ img: NSImage, minDimension: Int = 16) -> Bool {
         let maxW = img.representations.map(\.pixelsWide).max() ?? Int(img.size.width)
         let maxH = img.representations.map(\.pixelsHigh).max() ?? Int(img.size.height)
         return maxW >= minDimension && maxH >= minDimension
     }
 
-    /// 检测 Google S2 返回的默认灰地球占位图（尺寸 < 32 或低色差纯灰默认球）
-    private nonisolated static func isLikelyDefaultGrayGlobe(_ img: NSImage, rawByteCount: Int) -> Bool {
-        guard let tiff = img.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff) else {
-            return true
-        }
-        let w = rep.pixelsWide
-        let h = rep.pixelsHigh
-        // Google S2 无图标时固定返回 16×16 默认灰地球（即使请求 sz=128）
-        if w < 32 || h < 32 {
-            return true
-        }
-        // 进一步抽样过滤极低体积的纯灰默认占位图标
-        if rawByteCount < 900 {
-            var coloredPixels = 0
-            var visiblePixels = 0
-            let step = max(1, min(w, h) / 16)
-            for y in stride(from: 0, to: h, by: step) {
-                for x in stride(from: 0, to: w, by: step) {
-                    guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
-                    if c.alphaComponent < 0.15 { continue }
-                    visiblePixels += 1
-                    let chroma = max(abs(c.redComponent - c.greenComponent),
-                                     abs(c.greenComponent - c.blueComponent),
-                                     abs(c.redComponent - c.blueComponent))
-                    if chroma > 0.08 {
-                        coloredPixels += 1
-                    }
-                }
-            }
-            if visiblePixels == 0 || (coloredPixels == 0 && rawByteCount < 550) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private nonisolated static func isCloudflareChallenge(http: HTTPURLResponse, html: String) -> Bool {
-        if let cfMitigated = http.value(forHTTPHeaderField: "cf-mitigated"), !cfMitigated.isEmpty {
-            return true
-        }
-        if http.statusCode == 403 || http.statusCode == 503 {
-            let lower = html.lowercased()
-            if lower.contains("cloudflare") || lower.contains("just a moment") || lower.contains("_cf_chl_opt") || lower.contains("cf-browser-verification") {
-                return true
-            }
-        }
-        return false
-    }
-
-    /// 白名单官网抓图链路：apple-touch-icon → 高清 icon → og:image → 页面头部 Logo → Cloudflare/失败回退 Google Favicon (sz=128)
+    /// 高命中白名单官网抓图链路：
+    /// 1) 直读 /apple-touch-icon.png
+    /// 2) 解析首页 HTML（apple-touch-icon → 高清 icon → og:image，不盲抓正文/媒体徽章 <img>）
+    /// 3) 直读 /favicon.ico
+    /// 4) 稳定回退 Google Favicon 代理（sz=128，仅过滤 16×16 默认灰地球占位图，不误杀黑白单色标）
     private nonisolated static func fetchWhitelistedDomainIcon(domain: String, session: URLSession) async -> Data? {
         guard !isBlacklistedHost(domain) else { return nil }
 
-        var blockedByCloudflare = false
+        // 1) 优先直读根目录 /apple-touch-icon.png（最快、最清晰且不会抓到媒体背书图）
+        for urlStr in [
+            "https://\(domain)/apple-touch-icon.png",
+            "https://www.\(domain)/apple-touch-icon.png"
+        ] {
+            if let data = await downloadValidImage(urlStr: urlStr, session: session, checkHostBlacklist: true, minDimension: 24) {
+                return data
+            }
+        }
 
-        // 1) 解析官网首页 HTML（优先 apple-touch-icon / 高清 icon / og:image / 头部 Logo）
+        // 2) 解析官网首页 HTML 的 apple-touch-icon / icon / og:image
         for homeStr in ["https://\(domain)", "https://www.\(domain)"] {
             guard let homeURL = URL(string: homeStr),
                   let (htmlData, resp) = try? await session.data(from: homeURL),
-                  let http = resp as? HTTPURLResponse else {
+                  let http = resp as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let finalHost = resp.url?.host,
+                  !isBlacklistedHost(finalHost) else {
                 continue
             }
             let sample = String(data: htmlData.prefix(262_144), encoding: .utf8)
                 ?? String(data: htmlData.prefix(262_144), encoding: .isoLatin1)
                 ?? ""
-            if isCloudflareChallenge(http: http, html: sample) {
-                blockedByCloudflare = true
-                break
-            }
-            guard (200...299).contains(http.statusCode),
-                  let finalHost = resp.url?.host,
-                  !isBlacklistedHost(finalHost) else {
-                continue
-            }
             let candidates = extractHTMLIconURLs(html: sample, baseURL: resp.url ?? homeURL)
             for candidate in candidates {
-                if let data = await downloadValidImage(urlStr: candidate, session: session, checkHostBlacklist: true, minDimension: 24, filterGrayGlobe: false) {
-                    return data
-                }
-            }
-            break
-        }
-
-        // 2) 未被 Cloudflare 拦截时，直接探测 /apple-touch-icon.png 与 /favicon.ico
-        if !blockedByCloudflare {
-            let directCandidates = [
-                "https://\(domain)/apple-touch-icon.png",
-                "https://www.\(domain)/apple-touch-icon.png",
-                "https://\(domain)/favicon.ico",
-                "https://www.\(domain)/favicon.ico"
-            ]
-            for urlStr in directCandidates {
-                if let data = await downloadValidImage(urlStr: urlStr, session: session, checkHostBlacklist: true, minDimension: 24, filterGrayGlobe: false) {
+                if let data = await downloadValidImage(urlStr: candidate, session: session, checkHostBlacklist: true, minDimension: 20) {
                     return data
                 }
             }
         }
 
-        // 3) Cloudflare 拦截或直连未命中：回退 Google Favicon 代理（sz=128）并严格过滤默认灰地球图标
+        // 3) 尝试根目录 /favicon.ico
+        for urlStr in [
+            "https://\(domain)/favicon.ico",
+            "https://www.\(domain)/favicon.ico"
+        ] {
+            if let data = await downloadValidImage(urlStr: urlStr, session: session, checkHostBlacklist: true, minDimension: 16) {
+                return data
+            }
+        }
+
+        // 4) 稳定回退 Google Favicon（sz=128）；Google 无图标时仅返回 16×16 默认灰地球，>=24px 即真实品牌图标
         let s2 = "https://www.google.com/s2/favicons?domain=\(domain)&sz=128"
-        if let data = await downloadValidImage(urlStr: s2, session: session, checkHostBlacklist: false, minDimension: 32, filterGrayGlobe: true) {
+        if let data = await downloadValidImage(urlStr: s2, session: session, checkHostBlacklist: false, minDimension: 24) {
             return data
         }
 
@@ -832,6 +1027,10 @@ final class BrandLogoCache: ObservableObject {
                   !seen.contains(resolved) else {
                 return
             }
+            // NSImage(data:) 不支持直接解码 .svg，跳过避免浪费请求
+            if let pathExt = URL(string: resolved)?.pathExtension.lowercased(), pathExt == "svg" {
+                return
+            }
             if let host = URL(string: resolved)?.host, isBlacklistedHost(host) {
                 return
             }
@@ -839,7 +1038,7 @@ final class BrandLogoCache: ObservableObject {
             found.append(resolved)
         }
 
-        // 1) apple-touch-icon 优先
+        // 1) apple-touch-icon 优先，其次各类 rel="icon"
         let linkPatterns = [
             #"(?i)<link[^>]+rel=["'][^"']*apple-touch-icon[^"']*["'][^>]+href=["']([^"']+)["']"#,
             #"(?i)<link[^>]+href=["']([^"']+)["'][^>]+rel=["'][^"']*apple-touch-icon[^"']*["']"#,
@@ -849,7 +1048,7 @@ final class BrandLogoCache: ObservableObject {
         for pat in linkPatterns {
             if let regex = try? NSRegularExpression(pattern: pat) {
                 let matches = regex.matches(in: html, range: NSRange(html.startIndex..., in: html))
-                for m in matches.prefix(4) {
+                for m in matches.prefix(5) {
                     if let r = Range(m.range(at: 1), in: html) {
                         appendURL(String(html[r]))
                     }
@@ -857,39 +1056,9 @@ final class BrandLogoCache: ObservableObject {
             }
         }
 
-        // 2) og:image
+        // 2) og:image 作为高质量兜底
         if let og = extractMetaContent(html: html, property: "og:image") {
             appendURL(og)
-        }
-
-        // 3) 页面头部 Logo <img>（扫描 <header>...</header> 或带 logo/brand 属性的 <img>）
-        let headerRegions: [String] = {
-            var regions: [String] = []
-            if let regex = try? NSRegularExpression(pattern: #"(?is)<header\b[^>]*>.*?</header>"#) {
-                for m in regex.matches(in: html, range: NSRange(html.startIndex..., in: html)).prefix(2) {
-                    if let r = Range(m.range, in: html) {
-                        regions.append(String(html[r]))
-                    }
-                }
-            }
-            regions.append(String(html.prefix(65_536)))
-            return regions
-        }()
-
-        if let imgTagRegex = try? NSRegularExpression(pattern: #"(?is)<img\b[^>]*>"#),
-           let srcRegex = try? NSRegularExpression(pattern: #"(?i)\bsrc=["']([^"']+)["']"#) {
-            for region in headerRegions {
-                for m in imgTagRegex.matches(in: region, range: NSRange(region.startIndex..., in: region)).prefix(20) {
-                    guard let r = Range(m.range, in: region) else { continue }
-                    let tag = String(region[r])
-                    let lowerTag = tag.lowercased()
-                    guard lowerTag.contains("logo") || lowerTag.contains("brand") else { continue }
-                    if let sm = srcRegex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
-                       let sr = Range(sm.range(at: 1), in: tag) {
-                        appendURL(String(tag[sr]))
-                    }
-                }
-            }
         }
 
         return Array(found.prefix(10))
@@ -914,8 +1083,7 @@ final class BrandLogoCache: ObservableObject {
         urlStr: String,
         session: URLSession,
         checkHostBlacklist: Bool,
-        minDimension: Int,
-        filterGrayGlobe: Bool
+        minDimension: Int
     ) async -> Data? {
         guard let url = URL(string: urlStr) else { return nil }
         if checkHostBlacklist, let host = url.host, isBlacklistedHost(host) {
@@ -923,21 +1091,18 @@ final class BrandLogoCache: ObservableObject {
         }
         guard let (data, resp) = try? await session.data(from: url),
               let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
-              data.count > 250,
-              data.count <= 4 * 1024 * 1024 else {
+              data.count > 100,
+              data.count <= 6 * 1024 * 1024 else {
             return nil
         }
         if checkHostBlacklist, let finalHost = resp.url?.host, isBlacklistedHost(finalHost) {
             return nil
         }
         if let ct = http.value(forHTTPHeaderField: "Content-Type")?.lowercased(),
-           ct.contains("text/html") || ct.contains("application/xhtml") {
+           ct.contains("text/html") || ct.contains("application/xhtml") || ct.contains("image/svg") {
             return nil
         }
         guard let img = NSImage(data: data), isValidIcon(img, minDimension: minDimension) else {
-            return nil
-        }
-        if filterGrayGlobe && isLikelyDefaultGrayGlobe(img, rawByteCount: data.count) {
             return nil
         }
         return data
@@ -967,34 +1132,37 @@ final class BrandLogoCache: ObservableObject {
     }
 }
 
-/// 品牌圆形徽章（优先显示自定义/官方缓存 Logo，否则回退 iOS 通讯录风格圆形首字母徽章）
+/// 品牌 Logo 视图（v1.4.2 原形保真版）：
+/// - 有真实品牌图片时彻底移除圆形裁切与多余边框，按 `.resizable().scaledToFit()` 保留圆标/方标/横标/透明字标原始轮廓
+/// - 仅无图品牌保留极简首字母/中文首字圆形徽章兜底
 struct BrandAvatarView: View {
     @ObservedObject private var cache = BrandLogoCache.shared
     @Environment(\.colorScheme) private var scheme
 
     let brand: String
+    /// 目标高度（圆标/方标保持 1:1，横标按 maxWidth 自适应舒展）
     var size: CGFloat = 24
+    /// 横标允许的最大宽度（未指定时默认 size * 1.45）
+    var maxWidth: CGFloat? = nil
     var category: GearCategory? = nil
+    var alignment: Alignment = .center
+
+    private var effectiveMaxWidth: CGFloat {
+        max(size, maxWidth ?? (size * 1.45))
+    }
 
     var body: some View {
         let _ = cache.cacheRevision
         Group {
             if let img = cache.logoImage(for: brand) {
+                let invertForDark = (scheme == .dark) && cache.shouldInvertInDarkMode(image: img)
                 Image(nsImage: img)
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-                    .padding(size * 0.12)
-                    .frame(width: size, height: size)
-                    .background(
-                        Circle()
-                            .fill(scheme == .dark ? Color.white.opacity(0.92) : Color.white)
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(ShaveTheme.cardBorder(scheme), lineWidth: 0.75)
-                    )
-                    .clipShape(Circle())
+                    .modifier(ConditionalColorInvert(isEnabled: invertForDark))
+                    .frame(maxWidth: effectiveMaxWidth, maxHeight: size, alignment: alignment)
+                    .frame(minHeight: size, alignment: alignment)
             } else {
                 let bg = ShaveTheme.brandColor(for: brand)
                 let letters = BrandLogoCache.monogram(for: brand)
@@ -1023,6 +1191,19 @@ struct BrandAvatarView: View {
         }
         .onChange(of: cache.cacheRevision) { _, _ in
             cache.requestLogoIfNeeded(for: brand, category: category)
+        }
+    }
+}
+
+private struct ConditionalColorInvert: ViewModifier {
+    let isEnabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.colorInvert()
+        } else {
+            content
         }
     }
 }

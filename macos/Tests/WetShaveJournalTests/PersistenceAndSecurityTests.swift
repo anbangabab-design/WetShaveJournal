@@ -216,7 +216,43 @@ final class PersistenceAndSecurityTests: XCTestCase {
         XCTAssertEqual(failedMig.config.apiKey, "sk-fallback-key-999")
         XCTAssertEqual(defaults.string(forKey: AIConfig.legacyAPIKeyDefaultsKey), "sk-fallback-key-999")
 
-        // 3. 网络端点安全校验
+        // 3. 本地私有加密文件存储校验（0700 目录 + 0600 文件 + AES-GCM 密文无明文泄露 + 删除回读）
+        let secretRoot = try makeTempDir("local_secret")
+        defer { try? FileManager.default.removeItem(at: secretRoot) }
+        let secretDir = secretRoot.appendingPathComponent("WetShaveJournal_Secrets", isDirectory: true)
+        let secretFile = secretDir.appendingPathComponent("ai_key.bin", isDirectory: false)
+
+        XCTAssertNil(try LocalSecretStore.read(from: secretFile))
+
+        let sampleKey = "sk-live-local-secret-9876543210"
+        try LocalSecretStore.save(sampleKey, to: secretFile)
+        XCTAssertEqual(try LocalSecretStore.read(from: secretFile), sampleKey)
+
+        // 验证磁盘密文不包含明文 Key 或其 Base64 编码
+        let rawBytes = try Data(contentsOf: secretFile)
+        XCTAssertNil(rawBytes.range(of: Data(sampleKey.utf8)))
+        XCTAssertNil(rawBytes.range(of: Data(Data(sampleKey.utf8).base64EncodedString().utf8)))
+
+        // 验证严格权限：目录 0700，文件 0600
+        let dirPerms = try FileManager.default.attributesOfItem(atPath: secretDir.path)[.posixPermissions] as? NSNumber
+        let filePerms = try FileManager.default.attributesOfItem(atPath: secretFile.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual((dirPerms?.intValue ?? 0) & 0o777, 0o700)
+        XCTAssertEqual((filePerms?.intValue ?? 0) & 0o777, 0o600)
+
+        // 默认路径独立于 Google Drive CloudStorage 与 journal.json 所在目录
+        let defaultSecretPath = LocalSecretStore.defaultAIKeyFileURL.path
+        XCTAssertTrue(defaultSecretPath.hasSuffix("/Library/Application Support/WetShaveJournal_Secrets/ai_key.bin"))
+        XCTAssertFalse(defaultSecretPath.contains("/Library/CloudStorage/"))
+
+        // 损坏密文必须安全报错
+        try Data("corrupted-bytes".utf8).write(to: secretFile)
+        XCTAssertThrowsError(try LocalSecretStore.read(from: secretFile))
+
+        // 删除后回读为 nil
+        try LocalSecretStore.delete(at: secretFile)
+        XCTAssertNil(try LocalSecretStore.read(from: secretFile))
+
+        // 4. 网络端点安全校验
         XCTAssertNotNil(EndpointSecurityValidator.validate("https://api.deepseek.com/v1", allowLocalHTTP: true).url)
         XCTAssertNil(EndpointSecurityValidator.validate("http://api.deepseek.com/v1", allowLocalHTTP: true).url)
         XCTAssertNotNil(EndpointSecurityValidator.validate("http://127.0.0.1:8317/v1", allowLocalHTTP: true).url)

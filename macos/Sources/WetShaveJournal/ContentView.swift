@@ -37,12 +37,14 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var scheme
 
     @State private var selectedTab: AppTab = .journal
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    @State private var lastObservedWindowWidth: CGFloat = 0
     @State private var showNewEntrySheet = false
     @State private var newEntryDraft: SOTDDraft? = nil
 
     var body: some View {
         let _ = store.language
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List(AppTab.allCases, selection: $selectedTab) { tab in
                 NavigationLink(value: tab) {
                     HStack(spacing: 10) {
@@ -70,7 +72,7 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 256)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 214, max: 250)
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
                     Divider()
@@ -220,6 +222,32 @@ struct ContentView: View {
                 }
             }
         }
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        let w = geo.size.width
+                        lastObservedWindowWidth = w
+                        if w > 0 && w < 860 {
+                            columnVisibility = .detailOnly
+                        }
+                    }
+                    .onChange(of: geo.size.width) { _, newWidth in
+                        let prev = lastObservedWindowWidth
+                        lastObservedWindowWidth = newWidth
+                        guard newWidth > 0 else { return }
+                        if prev >= 860 && newWidth < 860 && columnVisibility != .detailOnly {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                columnVisibility = .detailOnly
+                            }
+                        } else if prev > 0 && prev < 960 && newWidth >= 960 && columnVisibility == .detailOnly {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                columnVisibility = .automatic
+                            }
+                        }
+                    }
+            }
+        )
         .task {
             await store.performStartupCloudSyncIfConfigured()
             await updateService.performSilentLaunchCheckIfEnabled()

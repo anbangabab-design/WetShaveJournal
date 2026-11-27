@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="1.4.1"
-BUILD_NUM="19"
+VERSION="1.4.2"
+BUILD_NUM="20"
 APP_NAME="WetShaveJournal"
 APP_DISPLAY_NAME="湿剃日记"
 ARCH_TAG="arm64"
@@ -49,6 +49,11 @@ cp "$TMP_BIN" "$APP/Contents/MacOS/WetShaveJournal"
 chmod +x "$APP/Contents/MacOS/WetShaveJournal"
 cp "$SCRIPT_DIR/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$SCRIPT_DIR/Resources/read-notes.js" "$APP/Contents/Resources/read-notes.js"
+if [ -d "$SCRIPT_DIR/Resources/BrandLogos" ]; then
+  rm -rf "$APP/Contents/Resources/BrandLogos"
+  cp -R "$SCRIPT_DIR/Resources/BrandLogos" "$APP/Contents/Resources/BrandLogos"
+  find "$APP/Contents/Resources/BrandLogos" -name ".DS_Store" -delete
+fi
 
 cat << EOF > "$APP/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>

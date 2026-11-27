@@ -191,7 +191,7 @@ struct SettingsView: View {
                                                 .contentShape(Rectangle())
                                         }
                                         .buttonStyle(.bordered)
-                                        .help(L10n.t("从钥匙串删除 API Key", "Delete API key from Keychain"))
+                                        .help(L10n.t("删除本机保存的 API Key", "Delete saved API key"))
                                     }
                                 }
                             }
@@ -238,7 +238,7 @@ struct SettingsView: View {
                                     .foregroundStyle(res.ok ? ShaveTheme.forest : ShaveTheme.crimson)
                                     .lineLimit(2)
                             } else {
-                                Text(L10n.t("Key 安全存于 macOS 钥匙串（Keychain），不写入 journal.json；不支持联网工具时自动回退普通请求", "Key stored securely in macOS Keychain (never in journal.json). Auto-falls back if web search tool is unsupported."))
+                                Text(L10n.t("Key 加密存于本机私有文件（仅当前用户可读，绝不写入 journal.json、不随云盘同步）；不支持联网工具时自动回退普通请求", "Key is encrypted in a local user-private file (never in journal.json or cloud sync). Auto-falls back if web search tool is unsupported."))
                                     .font(.system(size: 12))
                                     .foregroundStyle(.tertiary)
                             }
